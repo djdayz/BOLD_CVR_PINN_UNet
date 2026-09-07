@@ -1,0 +1,21 @@
+delay_grid_seconds:
+  min: 0.0
+  max: 80.0
+  step: 1.55
+T_grid_seconds:
+  min: 2.0
+  max: 100.0
+  step: 2.0
+drift_regressor: true
+glm:
+  delay_mode: voxelwise
+  global_delay_seconds: null
+  delay_grid_seconds:
+    min: -30.0
+    max: 120.0
+    step: 1.55
+output_dir: data/derivatives/real_cvr
+chunk_voxels: 6000
+candidate_batch_size: 256
+n_jobs: 2
+save_reconstruction: false

@@ -1,0 +1,91 @@
+mida:
+  label_map_path: data/raw/MIDA_v1.nii
+  output_dir: data/derivatives/mida
+  target_shape: [94, 94, 50]
+  target_voxel_size_mm: [2.5, 2.5, 2.5]
+  downsample_factor: [5, 5, 5]
+  target_geometry: mida_centered_2p5mm
+  vessel_brain_margin_mm: 3.0
+  fill_sigma_mm: 1.0
+  brain_support_fraction_threshold: 0.05
+  save_fsleyes_canonical: true
+  labels:
+    wm: [9, 12]
+    cortical_gm: [2, 10]
+    subcortical_gm: [4, 5, 7, 8, 16, 17, 20, 21, 99, 116]
+    vcsf: [6]
+    vessel_like: [24, 25]
+mida_parameter_maps:
+  distribution_path: data/distributions/tissue_parameter_samples.parquet
+  mida_dir: data/derivatives/mida/2p5mm
+  highres_dir: data/derivatives/mida/highres
+  output_dir: data/simulated/mida_parameters
+  n_cases: 100
+  seed: 17
+  component_fraction_min: 0.005
+  parameter_sampling_mode: subvoxel_monte_carlo
+  sample_quantile_min: 0.0
+  sample_quantile_max: 1.0
+  subvoxel_samples_per_lowres_voxel: 125
+  parameter_patch_size_vox: [1, 1, 1]
+  delay_sampling_mode: same_as_parameter
+  delay_sample_quantile_min: 0.0
+  delay_sample_quantile_max: 1.0
+  T_sampling_mode: same_as_parameter
+  T_sample_quantile_min: 0.0
+  T_sample_quantile_max: 1.0
+  parameter_post_smooth_sigma_vox: 0.0
+  parameter_post_smooth_blend: 0.0
+  spatial_smoothing_sigma_vox: 5.0
+  rank_jitter: 0.0
+  within_tissue_variation_scale: 1.0
+  save_highres_case_indices: []
+  save_fsleyes_canonical: true
+phantom:
+  enabled_when_mida_missing: true
+  shape: [32, 32, 8]
+  timepoints: 80
+  tr_seconds: 1.55
+noise_levels_tcnr: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+mida_bold_simulation:
+  parameter_case_dir: data/simulated/mida_parameters/case_000
+  output_mode: volume4d
+  tcnr_levels: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+  paradigms: [block, multi_step, pseudo_random_binary, sinusoidal, breath_hold_like, resting_state_like]
+  slice_indices: []
+  n_timepoints: 480
+  tr_seconds: 1.55
+  seed: 17
+  baseline_etco2_mmhg: 40.0
+  etco2_noise_sd_mmhg: 0.25
+  etco2_drift_sd_mmhg: 0.15
+  save_bold_psc_nifti: false
+  save_bold_intensity_nifti: true
+  save_slice_npz: false
+  save_gt_niftis: false
+  volume_chunk_voxels: 50000
+  max_cases:
+  case_start_index: 0
+  append_summary: false
+  ar1_rho: 0.35
+  drift_fraction_of_noise: 0.15
+  motion_spike_probability: 0.015
+  motion_spike_scale: 3.0
+  psc_spatial_smoothing_sigma_vox: 0.35
+  baseline_intensity: 320.0
+  baseline_bias_sd: 30.0
+qc:
+  cvr_min: -0.4
+  cvr_max: 1.8
+  delay_min: 0
+  delay_max: 80
+  T_min: 2
+  T_max: 100
+  r2_min: 0.05
+  baseline_min: 1e-6
+distribution_pooling:
+  segmentation_dir: data/derivatives/segmentation
+  include_whole_brain: true
+  include_boundary_region: true
+  max_voxels_per_region_session: 10000
+  random_seed: 17

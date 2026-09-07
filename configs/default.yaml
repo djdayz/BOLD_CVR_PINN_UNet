@@ -1,0 +1,16 @@
+project:
+  name: hybrid-cvr-unet-pinn
+  package: hybrid_cvr
+paths:
+  raw: data/raw
+  processed: data/processed
+  derivatives: data/derivatives
+  simulated: data/simulated
+  models: data/models
+parameter_ranges:
+  cvr_min: -0.4
+  cvr_max: 1.8
+  delay_min: 0.0
+  delay_max: 80.0
+  T_min: 2.0
+  T_max: 100.0

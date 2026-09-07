@@ -1,0 +1,56 @@
+segmentation:
+  preferred: ["fastsurfer"]
+  require_fastsurfer: true
+  method: "fastsurfer_labels_flirt"
+  output_dir: "data/derivatives/segmentation"
+  generate_qc_plots: false
+fastsurfer:
+  fastsurfer_home: "/Applications/FastSurfer-2.4.2"
+  subjects_dir: "data/derivatives/fastsurfer"
+  fs_license: null
+  python_cmd: "data/venvs/fastsurfer/bin/python"
+  device: "cpu"
+  threads: 4
+  run_surfaces: false
+  overwrite: false
+  allow_root: false
+  skip_cerebellum: true
+  skip_hypothalamus: true
+  skip_biasfield: true
+  dilate_masks: false
+  dilate_min_voxels: 20
+  dilate_iterations: 1
+  fallback_partial_volume_threshold: 0.05
+  registration_cost: "normmi"
+  use_brain_refweight: false
+registration:
+  preferred: ["flirt", "ants"]
+  allow_identity_for_tests: true
+vessel_likelihood:
+  output_dir: "data/derivatives/vessels"
+  real_cvr_dir: "data/derivatives/real_cvr"
+  segmentation_dir: "data/derivatives/segmentation"
+  high_percentile: 98.5
+  medium_percentile: 96
+  min_component_size: 5
+  closing_iterations: 1
+  vcsf_buffer_iterations: 1
+  tissue_boundary_buffer_iterations: 0
+  frangi_sigmas: [0.5, 1.0, 1.5, 2.0]
+  use_repeatability: true
+  repeatability_weight: 0.35
+  repeatability_resample_if_needed: true
+  generate_qc_plots: true
+  n_jobs: 1
+  weights:
+    abs_glm_cvr: 1.0
+    abs_hrf_cvr: 1.0
+    abs_tcnr: 1.0
+    temporal_std: 0.75
+    low_temporal_snr: 0.5
+    etco2_corr: 0.75
+    fit_quality: 0.5
+    bold_darkness: 0.75
+    mean_bold_frangi: 0.75
+    temporal_std_frangi: 0.5
+    fast_response: 0.25

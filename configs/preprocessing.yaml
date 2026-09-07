@@ -1,0 +1,29 @@
+bold:
+  tr_seconds: null
+  discard_volumes: 0
+  baseline_volumes: 30
+  min_baseline_quantile: 0.05
+  psc_clip_min: -100.0
+  psc_clip_max: 200.0
+  mask_path: null
+  generate_outputs: true
+  motion_correction:
+    enabled: true
+    tool: fsl_mcflirt
+gas:
+  time_column: sec
+  co2_column: PctCO2
+  sampling_rate_hz: 20
+  co2_units: percent
+  smoothing_seconds: 2.0
+  baseline_first_seconds: 45
+  baseline_reference: first_peak
+  baseline_statistic: mean
+  subject_database: /Users/mac/Library/CloudStorage/OneDrive-UniversityofEdinburgh/CVRsubject_database.xlsx
+  participants_path: /Users/mac/Downloads/CVR_repeatability_at_3T_data/participants.txt
+  source_time_offset_source: subject_database
+  apply_scan_start_offset: true
+  generate_qc_plots: false
+  peak_detection:
+    min_distance_seconds: 1.0
+    prominence: null
