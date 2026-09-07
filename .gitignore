@@ -1,0 +1,32 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+.DS_Store
+
+# Large/generated project data
+data/
+*.nii
+*.nii.gz
+*.mgz
+*.mat
+*.par
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.zarr/
+*.h5
+*.hdf5
+*.parquet
+
+# Local logs/outputs
+logs/
+outputs/
+wandb/
+mlruns/
+
+# Local secrets/environment
+.env
+.env.*
