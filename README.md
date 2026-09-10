@@ -39,6 +39,10 @@ Ground-truth simulated maps are used to generate synthetic BOLD and to evaluate
 held-out synthetic predictions. They are not model inputs and are not used for
 checkpoint selection.
 
+Architecture diagram:
+
+![Hybrid U-Net/PINN architecture](docs/figures/hybrid_unet_pinn_architecture.png)
+
 ## Repository Layout
 
 ```text
