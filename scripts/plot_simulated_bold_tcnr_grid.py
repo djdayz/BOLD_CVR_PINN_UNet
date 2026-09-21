@@ -128,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parents[1]
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bold-dir", type=Path, default=root / "data/simulated/bold4d")
-    ap.add_argument("--out-dir", type=Path, default=root / "data/vm_outputs/unet_pinn_fullbrain_T_recovery/time_series_concepts")
+    ap.add_argument("--out-dir", type=Path, default=root / "data/figures/presentation")
     ap.add_argument("--paradigm", default="block")
     ap.add_argument("--slice-index", type=int, default=54)
     ap.add_argument("--time-index", type=int, default=320)
