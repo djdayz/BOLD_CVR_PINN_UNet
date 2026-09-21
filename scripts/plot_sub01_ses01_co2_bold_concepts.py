@@ -217,17 +217,23 @@ def make_plot(args: argparse.Namespace) -> None:
         fontweight="bold",
     )
 
-    y_t = float((y_arrow_low + y_arrow_high) / 2.0)
     arrowprops = dict(arrowstyle="<->", lw=2.8, color="black", shrinkA=0, shrinkB=0)
     ax_bottom.annotate(
         "",
-        xy=(t_bold_late, y_t),
-        xytext=(t_bold_start, y_t),
+        xy=(t_bold_late, y_late),
+        xytext=(t_bold_start, y_start),
         arrowprops=dict(arrowstyle="->", lw=2.6, color="black", shrinkA=0, shrinkB=0),
+    )
+    ax_bottom.scatter(
+        [t_bold_start, t_bold_late],
+        [y_start, y_late],
+        s=18,
+        color="black",
+        zorder=5,
     )
     ax_bottom.text(
         (t_bold_start + t_bold_late) / 2.0,
-        y_t + 0.45,
+        (y_start + y_late) / 2.0 + 0.55,
         "Response time, T",
         ha="center",
         va="bottom",
@@ -250,10 +256,11 @@ def make_plot(args: argparse.Namespace) -> None:
     )
 
     ax_top.set_title("sub-01_ses-01: full ETCO2 stimulus and cortical-GM BOLD response", fontsize=11)
-    ax_bottom.set_xlim(float(time[0]), float(time[-1]))
+    display_start = 100.0
+    ax_bottom.set_xlim(display_start, float(time[-1]))
     tick_step = 100.0
     tick_max = float(np.ceil(time[-1] / tick_step) * tick_step)
-    ax_bottom.set_xticks(np.arange(0.0, tick_max + 0.5 * tick_step, tick_step))
+    ax_bottom.set_xticks(np.arange(display_start, tick_max + 0.5 * tick_step, tick_step))
     ax_bottom.margins(x=0)
     fig.text(
         0.12,
