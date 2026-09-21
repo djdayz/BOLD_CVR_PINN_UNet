@@ -218,31 +218,24 @@ def make_plot(args: argparse.Namespace) -> None:
     )
 
     arrowprops = dict(arrowstyle="<->", lw=2.8, color="black", shrinkA=0, shrinkB=0)
-    y_t_bracket = max(y_start, y_late) + 0.60
-    ax_bottom.vlines(
-        [t_bold_start, t_bold_late],
-        [y_start, y_late],
-        [y_t_bracket, y_t_bracket],
-        color="black",
-        linewidth=1.3,
-        linestyles=":",
-    )
+    t_t_visual = min(300.0, float(time[-1]))
+    y_t_visual = bold_at(time, bold_roi, t_t_visual)
     ax_bottom.annotate(
         "",
-        xy=(t_bold_late, y_t_bracket),
-        xytext=(t_bold_start, y_t_bracket),
-        arrowprops=dict(arrowstyle="<->", lw=2.6, color="black", shrinkA=0, shrinkB=0),
+        xy=(t_t_visual, y_t_visual),
+        xytext=(t_bold_start, y_t_visual),
+        arrowprops=dict(arrowstyle="->", lw=2.6, color="black", shrinkA=0, shrinkB=0),
     )
     ax_bottom.scatter(
-        [t_bold_start, t_bold_late],
-        [y_start, y_late],
-        s=18,
+        [t_t_visual],
+        [y_t_visual],
+        s=22,
         color="black",
         zorder=5,
     )
     ax_bottom.text(
-        (t_bold_start + t_bold_late) / 2.0,
-        y_t_bracket + 0.35,
+        (t_bold_start + t_t_visual) / 2.0,
+        y_t_visual + 0.35,
         "Response time constant, T",
         ha="center",
         va="bottom",
