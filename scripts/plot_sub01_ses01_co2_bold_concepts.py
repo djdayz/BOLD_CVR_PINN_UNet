@@ -147,7 +147,12 @@ def make_plot(args: argparse.Namespace) -> None:
     y_start = bold_at(time, bold_roi, t_bold_start)
     y_late = bold_at(time, bold_roi, t_bold_late)
 
-    cvr_window = (time >= t_bold_start) & (time <= min(float(time[-1]), t_bold_start + max(4.0 * roi_t, 90.0)))
+    # Keep the amplitude annotation within the first hypercapnic response while
+    # allowing enough time to reach its true BOLD peak.
+    cvr_window = (
+        (time >= t_bold_start)
+        & (time <= min(float(time[-1]), t_bold_start + max(6.0 * roi_t, 150.0)))
+    )
     if np.any(cvr_window):
         cvr_indices = np.where(cvr_window)[0]
         amp_idx = int(cvr_indices[np.nanargmax(bold_roi[cvr_window])])
@@ -293,8 +298,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--transition-time",
         type=float,
-        default=516.0,
-        help="CO2 transition time to annotate. Use none by editing/calling with omitted value only if automatic selection is desired.",
+        default=220.1,
+        help="CO2 transition time to annotate; defaults to the first sustained hypercapnia rise.",
     )
     return ap.parse_args()
 
