@@ -34,8 +34,8 @@ The non-causal 1D CNN and 3D U-Net predict voxelwise delay and `T`. Given those
 timing maps, CVR is profiled differentiably from raw BOLD PSC and delta-ETCO2
 amplitudes after removing intercept and linear drift. The differentiable ODE
 solver then reconstructs BOLD PSC. Training is strictly self-supervised and uses
-robust Student-t reconstruction likelihood, paired-view consistency, nuisance
-regularization, and weak label-free physiological constraints.
+robust Student-t reconstruction likelihood plus cross-paradigm consistency in
+the mixed-condition stage.
 There is no supervised GT parameter loss, tissue-distribution target, or spatial
 smoothness loss.
 
@@ -127,11 +127,13 @@ gas trace. The project has also used the external dataset at:
    voxels from tissue masks when pooling tissue distributions.
 8. Pool tissue-specific distributions of CVR, delay, and `T` from real-data maps.
 9. Segment MIDA at 0.5 mm, downsample to 2.5 mm tissue-fraction maps, and sample
-   pooled distributions to create partial-volume-aware GT parameter-map cases.
+   tissue-specific joint `(CVR, delay, T)` distributions to create
+   partial-volume-aware GT parameter-map cases.
 10. Generate synthetic 4D BOLD from GT `CVR`, `delay`, `T`, ETCO2 paradigms, and
     tCNR-dependent noise using the ODE forward model.
-11. Train the self-supervised 1D-CNN + 3D-U-Net physiology model on-the-fly with mixed cases, slices, ETCO2
-    paradigms, tCNR levels, seeds, drift, motion spikes, and ETCO2 noise.
+11. Train the self-supervised 1D-CNN + 3D-U-Net physiology model on complete
+    3D brain volumes generated on the fly with mixed cases, ETCO2 paradigms,
+    tCNR levels, seeds, drift, motion spikes, and ETCO2 noise.
 12. Export predicted maps for held-out synthetic validation/test conditions and
     run inference on real MCFLIRT-processed BOLD images.
 
@@ -212,27 +214,27 @@ hybrid-cvr simulate \
   --out data/simulated/bold4d
 ```
 
-Train the current temporal 3D self-supervised model:
+Train the current full-volume self-supervised physiology model:
 
 ```bash
 hybrid-cvr train \
   --config configs/train_cnn1d_unet3d_physiology.yaml \
   --sim-root data/simulated \
-  --out data/models/self_supervised_temporal_3d
+  --out data/models/self_supervised_cnn1d_profiled_cvr_v1
 ```
 
 Export one synthetic prediction or run real inference:
 
 ```bash
 hybrid-cvr predict-sim \
-  --checkpoint data/models/self_supervised_temporal_3d/stage_3_realistic_mixed_best.pt \
+  --checkpoint data/models/self_supervised_cnn1d_profiled_cvr_v1/best.pt \
   --config configs/train_cnn1d_unet3d_physiology.yaml \
   --sim-root data/simulated \
   --split test --case-id case_086 --paradigm block --tcnr 10 \
   --out data/evaluation/example_prediction
 
 hybrid-cvr infer-real \
-  --checkpoint data/models/self_supervised_temporal_3d/stage_3_realistic_mixed_best.pt \
+  --checkpoint data/models/self_supervised_cnn1d_profiled_cvr_v1/best.pt \
   --config configs/train_cnn1d_unet3d_physiology.yaml \
   --subject sub-01 \
   --session ses-01 \
@@ -310,6 +312,13 @@ forward model. Each synthetic condition combines:
 - AR(1)-like temporal noise
 - sparse motion spikes
 
+MIDA tissue components are simulated separately and mixed using the 2.5 mm
+tissue fractions so partial-volume effects occur in the signal domain. The
+current simulations do not apply spatial smoothing or an artificial intensity
+gradient. GT parameter maps are generated from tissue-specific joint
+distributions, with within-tissue variation and fraction-weighted mixing at
+tissue boundaries.
+
 The currently used ETCO2 paradigms are:
 
 - `block`
@@ -327,31 +336,34 @@ on-the-fly generation to avoid storing every simulated 4D image.
 
 ## Training Strategy
 
-The main strategy is on-the-fly mixed training. The model should not be trained
-sequentially on one tCNR/paradigm and then moved to the next, because that risks
-catastrophic forgetting and a checkpoint specialized to recent conditions.
+Training is performed on complete `94 x 94 x 50` brain volumes with all 480 time
+points. Synthetic BOLD is generated on the GPU as each batch is requested; the
+full training set is therefore reproducible from parameter-map cases, configs,
+and random seeds without storing thousands of 4D NIfTIs.
 
-Each batch randomly samples:
+Each training sample selects a parameter-map case, ETCO2 paradigm, tCNR level,
+noise seed, drift, motion-spike setting, AR(1) coefficient, ETCO2 measurement
+noise, and optional model mismatch. The model input contains only observable
+quantities:
 
-- parameter-map case ID from the training split
-- overlapping 3D brain patch with the complete 480-point time series
-- ETCO2 paradigm
-- tCNR level
-- noise seed
-- motion-spike setting
-- drift setting
-- ETCO2 measurement-noise setting
+```text
+baseline BOLD, mean PSC, PSC standard deviation, hypercapnic PSC change,
+tCNR, brain mask, zero-lag CO2 beta/correlation, peak CO2 correlation,
+and normalized peak-correlation lag
+```
 
-Validation uses held-out validation parameter-map cases with fixed
-seeds/configs, so validation losses are comparable across epochs. Checkpoint
-selection uses label-free validation losses only, not GT parameter metrics. GT
-parameter maps generate synthetic BOLD but are never passed to the network or
-used in the training loss.
+Tissue fractions, tissue identities, GT CVR, GT delay, GT `T`, and pooled
+parameter distributions are not model inputs or training targets.
 
-Testing uses held-out test parameter-map cases. GT maps are allowed only here for
-final metrics and plots.
+The non-causal voxelwise 1D CNN processes the complete normalized BOLD/ETCO2
+history to represent timing and response shape. A full-volume 3D U-Net combines
+those temporal embeddings with observable spatial features and predicts
+voxelwise delay and `T`. CVR is not a free neural-network output: after delay and
+`T` are predicted, a unit-CVR ODE response is generated and CVR is fitted from
+the raw BOLD PSC and delta-ETCO2 amplitudes by differentiable least squares.
+Only intercept and linear drift are removed during this amplitude fit.
 
-The current temporal-hybrid config is:
+The current config is:
 
 ```text
 configs/train_cnn1d_unet3d_physiology.yaml
@@ -360,38 +372,50 @@ configs/train_cnn1d_unet3d_physiology.yaml
 Key settings:
 
 ```text
-patch size: 32 x 32 x 24 at 2.5 mm
+spatial input: complete 94 x 94 x 50 volume at approximately 2.5 mm
 temporal input: complete 480-point BOLD PSC + ETCO2 + time
-temporal encoder: shared strided 1D CNN, 24-channel voxel embedding
-spatial model: 3D U-Net with parameter-specific residual decoders
-parameterization: direct voxelwise CVR, delay, and T
+temporal encoder: non-causal dilated 1D CNN, 48-channel voxel embedding
+spatial model: 3D U-Net, 24 base channels, depth 2
+predicted parameters: voxelwise delay and T
+profiled parameter: voxelwise CVR from raw physical amplitudes
 split fractions: 70% train, 15% validation, 15% test
-epochs: 1000
-stage 1: 200 epochs, clean/high-tCNR identification
-stage 2: 300 epochs, moderate noise and paired-view consistency
-stage 3: 400 epochs, robust mixed conditions and model mismatch
-stage 4: 100 epochs, very-low-tCNR stress testing
+samples per epoch: 8
+batch size: 1 full volume, gradient accumulation: 4
+epochs: 700
+stage 1: 200 epochs, clean tCNR 2/5/10, balanced paradigms, LR 1e-3
+stage 2: 500 epochs, all tCNR/paradigm conditions, LR 5e-4
+stage 2 low-tCNR probabilities: 0.05 each for tCNR 0.1 and 0.2
+stage 2 loss: reconstruction + 0.05 cross-paradigm consistency
 learning rate scheduler: none
-checkpoint metric: label-free validation composite
+validation: 21 fixed samples every 10 epochs
+checkpoint metric: lowest self-supervised validation total
 ```
 
-## Current Local Outputs
+The reconstruction objective is a robust Student-t negative log-likelihood.
+There is no supervised parameter-map loss, tissue-ranking loss, parameter-
+distribution prior, or spatial smoothness loss. Validation uses held-out cases
+and deterministic seeds. GT maps are permitted only after training for final
+validation/test metrics and figures; they are never used for checkpoint
+selection.
 
-Current fixed-grid synthetic evaluations and conventional HRF benchmarks are:
+## Current Model Outputs
+
+The current training run writes:
 
 ```text
-data/evaluation/self_supervised_temporal_3d_stage2_grid/
-data/evaluation/self_supervised_temporal_3d_stage3_grid/
-data/evaluation/hrf_conventional_test_grid/
+data/models/self_supervised_cnn1d_profiled_cvr_v1/
+  best.pt
+  last.pt
+  stage_1_identifiable_clean_best.pt
+  stage_2_mixed_all_conditions_best.pt
+  training_history.csv
+  logs/
 ```
 
-Aggregate result tables are:
-
-```text
-data/evaluation/stage2_vs_stage3_overall_metrics.csv
-data/evaluation/hrf_conventional_test_grid/test_overall_metrics.csv
-data/evaluation/hrf_conventional_test_grid/test_condition_metrics.csv
-```
+`best.pt` is updated only on validation epochs when the label-free validation
+total improves. Validation is intentionally skipped on other epochs; `nan` in
+those validation log fields means "not evaluated", not a numerical model
+failure.
 
 Real-subject inference outputs are written under
 `data/derivatives/real_inference/<subject>/<session>/`.
@@ -432,23 +456,12 @@ fsleyes \
 Open synthetic prediction QC:
 
 ```bash
-open data/evaluation/self_supervised_temporal_3d_stage3_grid/test/case_086/pseudo_random_binary/tcnr_10.0/predicted_maps_qc.png
-open data/evaluation/self_supervised_temporal_3d_stage3_grid/test/case_086/pseudo_random_binary/tcnr_10.0/prediction_error_uncertainty_qc.png
+open data/evaluation/current/test/case_086/pseudo_random_binary/tcnr_10.0/predicted_maps_qc.png
 ```
 
-`parameter_error_uncertainty_from_GT.nii.gz` exists only for synthetic
-validation/test outputs. It is a normalized GT-error QC map:
-
-```text
-(
-  abs(pred_CVR - GT_CVR) / 2.2
-  + abs(pred_delay - GT_delay) / 80
-  + abs(pred_T - GT_T) / 100
-) / 3
-```
-
-For real subjects, use `predicted_uncertainty_sigma.nii.gz` and
-`residual_rms.nii.gz` as QC/uncertainty-style outputs, because no GT maps exist.
+GT-error maps exist only for held-out synthetic validation/test outputs. For real
+subjects, use `predicted_uncertainty_sigma.nii.gz` and `residual_rms.nii.gz` as
+QC indicators because real GT parameter maps do not exist.
 
 ## Git Hygiene
 
@@ -483,8 +496,10 @@ Real-data CVR maps used for pooling are not true ground truth. ETCO2 is a proxy
 for arterial CO2. BOLD-CVR is affected by motion, physiological noise, baseline
 signal, vascular artifacts, partial volume, and scanner/session effects. Delay
 and `T` can be partially non-identifiable, especially for simple or low-SNR ETCO2
-paradigms. The current model processes overlapping 3D patches with the complete
-BOLD time series; sliding-window blending may still soften fine boundaries.
-Uncertainty maps are research QC indicators, not clinical confidence scores.
-Independent validation is required before any scientific claim is treated as
-robust.
+paradigms. A single effective ODE per voxel is an approximation at partial-volume
+boundaries where multiple tissue responses are mixed. The model processes the
+complete 3D volume and time series, but spatial context and noise-robust
+optimization can still soften fine boundaries. Profiled CVR depends on accurate
+delay/`T`, BOLD PSC scaling, and ETCO2 amplitude calibration. Uncertainty maps
+are research QC indicators, not clinical confidence scores. Independent
+validation is required before any scientific claim is treated as robust.
