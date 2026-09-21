@@ -5,23 +5,61 @@ from typing import Any
 from hybrid_cvr.config import require_dependency
 
 
+NORMOCAPNIA_SECONDS = 120.0
+
+
 def smooth_step(time: Any, onset: float, amplitude: float, ramp_seconds: float = 8.0) -> Any:
     np = require_dependency("numpy", "pip install numpy")
     return 0.5 * amplitude * (1.0 + np.tanh((np.asarray(time) - onset) / max(ramp_seconds, 1e-6)))
 
 
+def normocapnia_bounds(time: Any, normocapnia_seconds: float = NORMOCAPNIA_SECONDS) -> tuple[float, float]:
+    np = require_dependency("numpy", "pip install numpy")
+    t = np.asarray(time, dtype=float)
+    if t.size == 0:
+        return 0.0, 0.0
+    start = float(t.min()) + float(normocapnia_seconds)
+    end = float(t.max()) - float(normocapnia_seconds)
+    if end <= start:
+        midpoint = 0.5 * (float(t.min()) + float(t.max()))
+        return midpoint, midpoint
+    return start, end
+
+
+def enforce_normocapnia_edges(time: Any, values: Any, normocapnia_seconds: float = NORMOCAPNIA_SECONDS) -> Any:
+    np = require_dependency("numpy", "pip install numpy")
+    t = np.asarray(time, dtype=float)
+    u = np.asarray(values, dtype=float).copy()
+    if t.size == 0:
+        return u
+    start, end = normocapnia_bounds(t, normocapnia_seconds)
+    u[t < start] = 0.0
+    u[t > end] = 0.0
+    return u
+
+
 def block_paradigm(
     time: Any,
     amplitude: float = 8.0,
-    onsets: tuple[float, ...] = (60.0, 180.0, 300.0, 420.0),
+    normocapnia_seconds: float = NORMOCAPNIA_SECONDS,
 ) -> Any:
     np = require_dependency("numpy", "pip install numpy")
-    u = np.zeros_like(np.asarray(time, dtype=float))
-    sign = 1.0
-    for onset in onsets:
-        u += sign * smooth_step(time, onset, amplitude, ramp_seconds=8.0)
-        sign *= -1.0
-    return u
+    t = np.asarray(time, dtype=float)
+    u = np.zeros_like(t)
+    active_start, active_end = normocapnia_bounds(t, normocapnia_seconds)
+    if active_end <= active_start:
+        return u
+    hyper_seconds = min(180.0, max(30.0, (active_end - active_start) * 0.375))
+    normo_gap = min(120.0, max(20.0, active_end - active_start - 2.0 * hyper_seconds))
+    onsets = (
+        active_start,
+        active_start + hyper_seconds,
+        active_start + hyper_seconds + normo_gap,
+        min(active_end, active_start + 2.0 * hyper_seconds + normo_gap),
+    )
+    for onset, step_amplitude in zip(onsets, (amplitude, -amplitude, amplitude, -amplitude), strict=True):
+        u += smooth_step(t, onset, step_amplitude, ramp_seconds=8.0)
+    return enforce_normocapnia_edges(t, u, normocapnia_seconds)
 
 
 def ramp_paradigm(time: Any, amplitude: float = 10.0) -> Any:
@@ -35,19 +73,26 @@ def sinusoidal_paradigm(time: Any, amplitude: float = 4.0, period_seconds: float
     return amplitude * np.sin(2.0 * np.pi * np.asarray(time) / period_seconds)
 
 
-def multi_step_paradigm(time: Any, levels: tuple[float, ...] = (0.0, 4.0, 8.0, 2.0, 10.0, 0.0)) -> Any:
+def multi_step_paradigm(
+    time: Any,
+    levels: tuple[float, ...] = (0.0, 4.0, 8.0, 2.0, 10.0, 0.0),
+    normocapnia_seconds: float = NORMOCAPNIA_SECONDS,
+) -> Any:
     np = require_dependency("numpy", "pip install numpy")
     t = np.asarray(time, dtype=float)
     if t.size == 0:
         return t.copy()
-    edges = np.linspace(float(t.min()), float(t.max()), len(levels) + 1)
+    active_start, active_end = normocapnia_bounds(t, normocapnia_seconds)
+    if active_end <= active_start:
+        return np.zeros_like(t)
+    edges = np.linspace(active_start, active_end, len(levels) + 1)
     u = np.zeros_like(t)
     previous = float(levels[0])
     for idx, level in enumerate(levels[1:], start=1):
         onset = edges[idx]
         u += smooth_step(t, onset, float(level) - previous, ramp_seconds=10.0)
         previous = float(level)
-    return u
+    return enforce_normocapnia_edges(t, u, normocapnia_seconds)
 
 
 def pseudo_random_binary_paradigm(
@@ -55,22 +100,28 @@ def pseudo_random_binary_paradigm(
     amplitude: float = 7.0,
     block_seconds: float = 45.0,
     seed: int | None = None,
+    normocapnia_seconds: float = NORMOCAPNIA_SECONDS,
 ) -> Any:
     np = require_dependency("numpy", "pip install numpy")
     t = np.asarray(time, dtype=float)
     if t.size == 0:
         return t.copy()
     rng = np.random.default_rng(seed)
-    n_blocks = max(2, int(np.ceil((t.max() - t.min()) / max(block_seconds, 1e-6))))
+    active_start, active_end = normocapnia_bounds(t, normocapnia_seconds)
+    if active_end <= active_start:
+        return np.zeros_like(t)
+    n_blocks = max(2, int(np.ceil((active_end - active_start) / max(block_seconds, 1e-6))))
     states = rng.integers(0, 2, size=n_blocks + 1).astype(float) * amplitude
     states[0] = 0.0
-    edges = t.min() + np.arange(n_blocks + 1) * block_seconds
+    states[-1] = 0.0
+    edges = active_start + np.arange(n_blocks + 1) * block_seconds
+    edges[-1] = active_end
     u = np.zeros_like(t)
     previous = states[0]
     for onset, state in zip(edges[1:], states[1:], strict=False):
         u += smooth_step(t, float(onset), float(state - previous), ramp_seconds=8.0)
         previous = state
-    return u
+    return enforce_normocapnia_edges(t, u, normocapnia_seconds)
 
 
 def breath_hold_like_paradigm(

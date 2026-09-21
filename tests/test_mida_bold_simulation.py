@@ -63,6 +63,16 @@ def test_block_paradigm_has_two_smooth_blocks_by_default():
     assert stops.size == 2
 
 
+def test_selected_paradigms_keep_two_minute_normocapnia_edges():
+    time = np.arange(480, dtype=np.float32) * 1.55
+    edge = 120.0
+    for name in ["block", "multi_step", "pseudo_random_binary"]:
+        u = make_paradigm(name, time, seed=17)
+        assert np.allclose(u[time < edge], 0.0)
+        assert np.allclose(u[time > time.max() - edge], 0.0)
+        assert np.max(u) > 1.0
+
+
 def test_simulate_mida_bold_dataset_writes_npz_etco2_and_summary(tmp_path):
     case_dir = tmp_path / "params"
     _write_parameter_case(case_dir)

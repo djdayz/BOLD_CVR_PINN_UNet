@@ -3,6 +3,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from hybrid_cvr.models.hybrid_unet_pinn import HybridUNetPINN
+from hybrid_cvr.models.temporal_hybrid_3d import TemporalHybridUNetPINN
 
 
 def test_unet_output_shape_and_constraints():
@@ -29,3 +30,24 @@ def test_unet_T_modes_forward_with_ode():
         out = model(x, etco2=etco2, time_grid=time, mask=mask, tissue_maps=tissue)
         assert out["T"].shape == (2, 16, 16)
         assert out["bold_psc_hat"].shape == (2, 8, 16, 16)
+
+
+def test_temporal_hybrid_3d_forward_with_direct_bounded_heads():
+    model = TemporalHybridUNetPINN(
+        in_channels=4,
+        base_channels=4,
+        depth=2,
+        temporal_embedding_channels=8,
+    )
+    features = torch.randn(1, 4, 8, 8, 8)
+    bold = torch.randn(1, 32, 8, 8, 8)
+    etco2 = torch.sin(torch.arange(32).float() / 4).unsqueeze(0)
+    time = torch.arange(32).float()
+    mask = torch.ones(1, 8, 8, 8)
+    out = model(features, etco2=etco2, time_grid=time, mask=mask, bold_psc=bold)
+    assert out["cvr"].shape == (1, 8, 8, 8)
+    assert out["bold_psc_hat"].shape == (1, 32, 8, 8, 8)
+    assert torch.all((out["cvr"] >= 0.0) & (out["cvr"] <= 1.8))
+    assert torch.all((out["delay"] >= 0.0) & (out["delay"] <= 80.0))
+    assert torch.all((out["T"] >= 2.0) & (out["T"] <= 100.0))
+    assert set(out["parameter_log_var"]) == {"cvr", "delay", "T"}

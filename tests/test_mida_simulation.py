@@ -4,13 +4,18 @@ np = pytest.importorskip("numpy")
 
 from hybrid_cvr.simulation.mida import (  # noqa: E402
     block_average,
+    bootstrap_joint_tissue_vector,
     dominant_region_label,
     fill_lowres_brain_support,
+    median_std_joint_rows,
     normalize_fraction_maps,
     patchwise_rows,
     sample_partial_volume_maps,
     smooth_parameter_maps_in_support,
     softly_fill_internal_holes,
+    spatially_coherent_joint_rows,
+    stratified_joint_rows,
+    tissue_ranked_joint_rows,
     subvoxel_average_rows,
 )
 
@@ -100,6 +105,88 @@ def test_partial_volume_sampling_is_reproducible_and_weighted():
     assert maps["T"][0, 0, 0] == pytest.approx(25.0)
 
 
+def test_voxelwise_joint_sampling_varies_values_inside_same_tissue():
+    fractions = {
+        "cortical_gm": np.ones((20, 1, 1), dtype=np.float32),
+        "subcortical_gm": np.zeros((20, 1, 1), dtype=np.float32),
+        "wm": np.zeros((20, 1, 1), dtype=np.float32),
+        "vcsf": np.zeros((20, 1, 1), dtype=np.float32),
+        "vessel_like": np.zeros((20, 1, 1), dtype=np.float32),
+    }
+    samples = {
+        region: np.array(
+            [
+                [0.1, 1.0, 10.0],
+                [0.2, 20.0, 30.0],
+                [0.4, 40.0, 50.0],
+            ],
+            dtype=np.float32,
+        )
+        for region in fractions
+    }
+
+    maps = sample_partial_volume_maps(
+        fractions,
+        samples,
+        np.random.default_rng(17),
+        parameter_sampling_mode="joint_3d_voxelwise",
+    )
+
+    assert np.unique(maps["CVR"][fractions["cortical_gm"] > 0]).size > 1
+    assert np.unique(maps["delay"][fractions["cortical_gm"] > 0]).size > 1
+    assert np.unique(maps["T"][fractions["cortical_gm"] > 0]).size > 1
+
+
+def test_median_std_joint_sampling_varies_near_tissue_median():
+    rows = np.array(
+        [
+            [0.1, 5.0, 20.0],
+            [0.2, 10.0, 30.0],
+            [0.3, 15.0, 40.0],
+            [1.1, 80.0, 100.0],
+        ],
+        dtype=np.float32,
+    )
+
+    samples = median_std_joint_rows(rows, 2000, np.random.default_rng(17), scale=0.15)
+
+    assert samples.shape == (2000, 3)
+    assert np.unique(np.round(samples[:, 0], 3)).size > 1
+    assert np.median(samples[:, 0]) == pytest.approx(np.median(rows[:, 0]), abs=0.04)
+    assert np.median(samples[:, 1]) == pytest.approx(np.median(rows[:, 1]), abs=3.0)
+    assert samples[:, 0].std() < rows[:, 0].std()
+    assert samples[:, 1].std() < rows[:, 1].std()
+    assert samples[:, 2].std() < rows[:, 2].std()
+
+
+def test_mean_std_joint_sampling_varies_near_tissue_mean():
+    rows = np.array(
+        [
+            [0.1, 5.0, 20.0],
+            [0.2, 10.0, 30.0],
+            [0.3, 15.0, 40.0],
+            [1.1, 80.0, 100.0],
+        ],
+        dtype=np.float32,
+    )
+
+    samples = median_std_joint_rows(
+        rows,
+        2000,
+        np.random.default_rng(17),
+        scale=0.15,
+        center_method="mean",
+    )
+
+    assert samples.shape == (2000, 3)
+    assert np.unique(np.round(samples[:, 0], 3)).size > 1
+    assert np.mean(samples[:, 0]) == pytest.approx(np.mean(rows[:, 0]), abs=0.04)
+    assert np.mean(samples[:, 1]) == pytest.approx(np.mean(rows[:, 1]), abs=3.0)
+    assert samples[:, 0].std() < rows[:, 0].std()
+    assert samples[:, 1].std() < rows[:, 1].std()
+    assert samples[:, 2].std() < rows[:, 2].std()
+
+
 def test_patchwise_sampling_gives_multiple_values_inside_one_tissue():
     rows = np.array(
         [
@@ -134,6 +221,76 @@ def test_subvoxel_average_rows_averages_multiple_draws():
     assert samples[:, 0].std() < 0.25
     assert 0.5 < samples[:, 0].mean() < 1.5
     assert np.unique(np.round(samples[:, 0], 2)).size > 1
+
+
+def test_stratified_joint_rows_preserves_observed_triplets():
+    rows = np.array(
+        [
+            [0.1, 0.0, 2.0],
+            [0.2, 20.0, 30.0],
+            [0.8, 70.0, 90.0],
+        ],
+        dtype=np.float32,
+    )
+
+    samples = stratified_joint_rows(rows, 30, np.random.default_rng(17))
+
+    assert samples.shape == (30, 3)
+    assert {tuple(row) for row in np.unique(samples, axis=0)} <= {tuple(row) for row in rows}
+
+
+def test_bootstrap_joint_tissue_vector_uses_joint_rows_without_single_row_outlier():
+    rows = np.array(
+        [
+            [0.1, 0.0, 2.0],
+            [0.2, 20.0, 30.0],
+            [0.8, 70.0, 90.0],
+        ],
+        dtype=np.float32,
+    )
+
+    vector = bootstrap_joint_tissue_vector(rows, np.random.default_rng(17), n_bootstrap=300)
+
+    assert vector.shape == (3,)
+    assert rows[:, 0].min() <= vector[0] <= rows[:, 0].max()
+    assert rows[:, 1].min() <= vector[1] <= rows[:, 1].max()
+    assert rows[:, 2].min() <= vector[2] <= rows[:, 2].max()
+
+
+def test_spatial_joint_sampling_keeps_cvr_delay_T_from_same_rows():
+    rows = np.array(
+        [
+            [0.1, 0.0, 2.0],
+            [0.2, 20.0, 30.0],
+            [0.8, 70.0, 90.0],
+        ],
+        dtype=np.float32,
+    )
+    keep = np.ones((4, 4, 2), dtype=bool)
+
+    samples = spatially_coherent_joint_rows(rows, keep, np.random.default_rng(17), smoothing_sigma_vox=1.0)
+
+    assert samples.shape == (32, 3)
+    assert {tuple(row) for row in np.unique(samples, axis=0)} <= {tuple(row) for row in rows}
+
+
+def test_tissue_ranked_joint_sampling_uses_anatomical_rank_not_random_field():
+    rows = np.array(
+        [
+            [0.1, 0.0, 2.0],
+            [0.2, 20.0, 30.0],
+            [0.8, 70.0, 90.0],
+        ],
+        dtype=np.float32,
+    )
+    keep = np.ones((6, 1, 1), dtype=bool)
+    fraction = np.linspace(0.1, 1.0, 6, dtype=np.float32).reshape(6, 1, 1)
+
+    samples = tissue_ranked_joint_rows(rows, keep, fraction, np.random.default_rng(17))
+
+    assert samples.shape == (6, 3)
+    assert {tuple(row) for row in np.unique(samples, axis=0)} <= {tuple(row) for row in rows}
+    assert samples[-1, 0] >= samples[0, 0]
 
 
 def test_parameter_smoothing_preserves_sampled_distribution():

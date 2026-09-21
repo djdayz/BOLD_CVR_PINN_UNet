@@ -7,7 +7,10 @@ from typing import Any
 
 from hybrid_cvr.inference.predict_sim import _load_model, _save_float_nifti
 from hybrid_cvr.simulation.mida_bold import TISSUE_FRACTION_NAMES, tissue_boundary_uncertainty
-from hybrid_cvr.training.on_the_fly_dataset import ON_THE_FLY_FEATURE_NAMES
+from hybrid_cvr.training.on_the_fly_dataset import (
+    ON_THE_FLY_FEATURE_NAMES,
+    temporal_response_feature_maps_numpy,
+)
 
 
 def real_inference_outputs() -> list[str]:
@@ -326,6 +329,16 @@ def _build_real_feature_volume(
     }
     for frac, name in zip(fractions, TISSUE_FRACTION_NAMES, strict=True):
         maps[f"fraction_{name}"] = frac.astype(np.float32)
+    maps.update(
+        temporal_response_feature_maps_numpy(
+            psc,
+            etco2,
+            mask,
+            tr_seconds=float(config.get("dataset", {}).get("tr_seconds", 1.55)),
+            time_axis=3,
+            np=np,
+        )
+    )
     features = np.stack([maps[name] for name in ON_THE_FLY_FEATURE_NAMES], axis=0).astype(np.float32)
     features[:, ~np.asarray(mask, dtype=bool)] = 0.0
     return features

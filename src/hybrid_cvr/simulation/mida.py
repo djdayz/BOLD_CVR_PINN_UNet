@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
@@ -51,10 +52,11 @@ class MidaParameterConfig:
     n_cases: int = 1
     seed: int = 17
     component_fraction_min: float = 0.005
-    parameter_sampling_mode: str = "subvoxel_monte_carlo"
+    parameter_sampling_mode: str = "joint_3d_mean_std"
     sample_quantile_min: float = 0.0
     sample_quantile_max: float = 1.0
     subvoxel_samples_per_lowres_voxel: int = 125
+    tissue_bootstrap_samples_per_region: int = 256
     parameter_patch_size_vox: tuple[int, int, int] = (1, 1, 1)
     delay_sampling_mode: str = "same_as_parameter"
     delay_sample_quantile_min: float = 0.0
@@ -64,9 +66,10 @@ class MidaParameterConfig:
     T_sample_quantile_max: float = 1.0
     parameter_post_smooth_sigma_vox: float = 0.0
     parameter_post_smooth_blend: float = 0.0
-    spatial_smoothing_sigma_vox: float = 5.0
+    spatial_smoothing_sigma_vox: float = 0.0
     rank_jitter: float = 0.0
-    within_tissue_variation_scale: float = 1.0
+    within_tissue_variation_scale: float = 0.05
+    delay_floor_inside_support_seconds: float = 1.55
     save_highres_case_indices: tuple[int, ...] = field(default_factory=tuple)
     save_fsleyes_canonical: bool = True
 
@@ -404,7 +407,7 @@ def generate_mida_parameter_maps(config: MidaParameterConfig | None = None) -> d
         case_id = f"case_{case_idx:03d}"
         case_dir = output_dir / case_id
         case_dir.mkdir(parents=True, exist_ok=True)
-        maps = sample_partial_volume_maps(
+        sampled_maps = sample_partial_volume_maps(
             fractions,
             grouped,
             rng,
@@ -419,8 +422,19 @@ def generate_mida_parameter_maps(config: MidaParameterConfig | None = None) -> d
             spatial_smoothing_sigma_vox=config.spatial_smoothing_sigma_vox,
             rank_jitter=config.rank_jitter,
             within_tissue_variation_scale=config.within_tissue_variation_scale,
+            tissue_bootstrap_samples_per_region=config.tissue_bootstrap_samples_per_region,
         )
+        component_maps = {
+            name: values
+            for name, values in sampled_maps.items()
+            if name.startswith("component_")
+        }
+        maps = {name: sampled_maps[name] for name in ("CVR", "delay", "T")}
         maps = nearest_fill_parameter_maps(maps, support)
+        maps["delay"][support] = np.maximum(
+            maps["delay"][support],
+            float(config.delay_floor_inside_support_seconds),
+        )
         maps = smooth_parameter_maps_in_support(
             maps,
             support,
@@ -431,6 +445,10 @@ def generate_mida_parameter_maps(config: MidaParameterConfig | None = None) -> d
         maps["CVR"][~support] = 0.0
         maps["delay"][~support] = 0.0
         maps["T"][~support] = 0.0
+        for name, values in component_maps.items():
+            arr = np.asarray(values, dtype=np.float32).copy()
+            arr[~support] = 0.0
+            component_maps[name] = arr
 
         case_paths = [
             save_nifti(maps["CVR"], ref_img, case_dir / "GT_CVR.nii.gz", dtype=np.float32),
@@ -448,6 +466,9 @@ def generate_mida_parameter_maps(config: MidaParameterConfig | None = None) -> d
             case_paths.append(
                 save_nifti(fraction, ref_img, case_dir / f"GT_fraction_{name}.nii.gz", dtype=np.float32)
             )
+        for name, values in component_maps.items():
+            save_nifti(values, ref_img, case_dir / f"GT_{name}.nii.gz", dtype=np.float32)
+        maps_for_metadata = {**maps, **component_maps}
         qc_png = save_parameter_qc_plot(
             maps,
             fractions,
@@ -458,6 +479,14 @@ def generate_mida_parameter_maps(config: MidaParameterConfig | None = None) -> d
         canonical_dir = ""
         if config.save_fsleyes_canonical:
             canonical_dir = str(save_canonical_nifti_copies(case_paths, case_dir / "fsleyes_RAS"))
+        metadata_path = write_parameter_case_metadata(
+            case_dir / "metadata.json",
+            case_id,
+            maps_for_metadata,
+            support,
+            config,
+            region_labels=dominant,
+        )
         highres_outputs = {}
         if case_idx in set(config.save_highres_case_indices):
             highres_outputs = save_highres_parameter_qc_case(config, table, rng, case_dir / "highres_qc")
@@ -473,6 +502,7 @@ def generate_mida_parameter_maps(config: MidaParameterConfig | None = None) -> d
                 "mida_parameter_qc": str(qc_png),
                 "fsleyes_canonical_dir": canonical_dir,
                 "highres_qc_dir": str(highres_outputs.get("highres_qc_dir", "")),
+                "metadata": str(metadata_path),
             }
         )
 
@@ -536,6 +566,7 @@ def sample_partial_volume_maps(
     component_fraction_min: float = 0.005,
     parameter_sampling_mode: str = "tissue_constant",
     subvoxel_samples_per_lowres_voxel: int = 125,
+    tissue_bootstrap_samples_per_region: int = 256,
     parameter_patch_size_vox: tuple[int, int, int] = (3, 3, 2),
     delay_region_samples: dict[str, Any] | None = None,
     delay_sampling_mode: str = "tissue_constant",
@@ -548,6 +579,11 @@ def sample_partial_volume_maps(
     np = require_dependency("numpy", "pip install numpy")
     shape = next(iter(fractions.values())).shape
     accum = {name: np.zeros(shape, dtype=np.float32) for name in ("CVR", "delay", "T")}
+    component_maps = {
+        f"component_{param_name}_{region}": np.zeros(shape, dtype=np.float32)
+        for region in fractions
+        for param_name in ("CVR", "delay", "T")
+    }
     weight_sum = np.zeros(shape, dtype=np.float32)
     for region, fraction in fractions.items():
         frac = np.asarray(fraction, dtype=np.float32)
@@ -555,8 +591,60 @@ def sample_partial_volume_maps(
         n = int(np.count_nonzero(keep))
         if n == 0:
             continue
-        if parameter_sampling_mode in {"tissue_constant", "region_constant"}:
+        is_tissue_constant_mode = parameter_sampling_mode in {
+            "tissue_constant",
+            "region_constant",
+            "joint_3d_tissue_constant",
+            "joint3d_tissue_constant",
+        }
+        is_tissue_bootstrap_mode = parameter_sampling_mode in {
+            "joint_3d_tissue_bootstrap",
+            "joint3d_tissue_bootstrap",
+            "tissue_bootstrap_joint",
+            "bootstrap_joint",
+        }
+        is_joint_median_std_mode = parameter_sampling_mode in {
+            "joint_3d_median_std",
+            "joint3d_median_std",
+            "median_std_joint",
+            "tissue_median_std",
+        }
+        is_joint_mean_std_mode = parameter_sampling_mode in {
+            "joint_3d_mean_std",
+            "joint3d_mean_std",
+            "mean_std_joint",
+            "tissue_mean_std",
+        }
+        is_joint_voxelwise_mode = parameter_sampling_mode in {
+            "joint_3d_voxelwise",
+            "joint3d_voxelwise",
+            "joint_3d_voxelwise_blend",
+            "joint3d_voxelwise_blend",
+            "voxelwise_joint",
+            "tissue_voxelwise_joint",
+        }
+        if is_tissue_constant_mode:
             samples = np.repeat(sample_rows(region_samples[region], 1, rng), n, axis=0)
+        elif is_tissue_bootstrap_mode:
+            samples = np.repeat(
+                bootstrap_joint_tissue_vector(
+                    region_samples[region],
+                    rng,
+                    n_bootstrap=tissue_bootstrap_samples_per_region,
+                )[None, :],
+                n,
+                axis=0,
+            )
+        elif is_joint_median_std_mode or is_joint_mean_std_mode:
+            samples = median_std_joint_rows(
+                region_samples[region],
+                n,
+                rng,
+                scale=within_tissue_variation_scale,
+                center_method="mean" if is_joint_mean_std_mode else "median",
+            )
+        elif is_joint_voxelwise_mode:
+            samples = sample_rows(region_samples[region], n, rng)
         elif parameter_sampling_mode in {
             "subvoxel_monte_carlo",
             "subvoxel_average",
@@ -568,6 +656,37 @@ def sample_partial_volume_maps(
                 rng,
                 n_subvoxels=subvoxel_samples_per_lowres_voxel,
             )
+        elif parameter_sampling_mode in {
+            "joint_3d_tissue_rank",
+            "joint3d_tissue_rank",
+            "tissue_ranked_joint",
+            "tissue_anatomy_ranked_joint",
+        }:
+            samples = tissue_ranked_joint_rows(
+                region_samples[region],
+                keep,
+                frac,
+                rng,
+            )
+        elif parameter_sampling_mode in {
+            "joint_3d_spatial",
+            "joint3d_spatial",
+            "tissue_joint_3d",
+            "tissue_joint_3d_spatial",
+        }:
+            samples = spatially_coherent_joint_rows(
+                region_samples[region],
+                keep,
+                rng,
+                smoothing_sigma_vox=spatial_smoothing_sigma_vox,
+                rank_jitter=rank_jitter,
+            )
+        elif parameter_sampling_mode in {
+            "joint_3d_stratified",
+            "joint3d_stratified",
+            "tissue_joint_3d_stratified",
+        }:
+            samples = stratified_joint_rows(region_samples[region], n, rng)
         elif parameter_sampling_mode in {"tissue_patch_distribution", "patch_distribution", "patchwise"}:
             samples = patchwise_rows(region_samples[region], keep, rng, parameter_patch_size_vox)
         elif parameter_sampling_mode in {"spatial", "spatial_quantile", "coherent"}:
@@ -585,6 +704,12 @@ def sample_partial_volume_maps(
             )
         else:
             samples = sample_rows(region_samples[region], n, rng)
+        if not (is_tissue_constant_mode or is_tissue_bootstrap_mode or is_joint_median_std_mode or is_joint_mean_std_mode):
+            samples = shrink_samples_to_region_center(
+                region_samples[region],
+                samples,
+                scale=within_tissue_variation_scale,
+            )
         if delay_sampling_mode in {"tissue_stratified_full", "stratified_full", "full_distribution"}:
             delay_pool = region_samples[region] if delay_region_samples is None else delay_region_samples[region]
             samples[:, 1] = stratified_parameter_values(
@@ -602,6 +727,7 @@ def sample_partial_volume_maps(
                 rng,
             )
         for col_idx, name in enumerate(("CVR", "delay", "T")):
+            component_maps[f"component_{name}_{region}"][keep] = samples[:, col_idx]
             accum[name][keep] += frac[keep] * samples[:, col_idx]
         weight_sum[keep] += frac[keep]
     for name in accum:
@@ -611,6 +737,7 @@ def sample_partial_volume_maps(
             out=np.zeros_like(accum[name], dtype=np.float32),
             where=weight_sum > 0,
         )
+    accum.update(component_maps)
     return accum
 
 
@@ -661,6 +788,121 @@ def subvoxel_average_rows(rows: Any, fractions: Any, rng: Any, n_subvoxels: int 
         idx = rng.integers(0, arr.shape[0], size=(positions.size, int(count)))
         out[positions] = arr[idx].mean(axis=1, dtype=np.float32)
     return out
+
+
+def stratified_joint_rows(rows: Any, n: int, rng: Any) -> Any:
+    np = require_dependency("numpy", "pip install numpy")
+    arr = np.asarray(rows, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] != 3 or arr.shape[0] == 0:
+        raise ValueError("Region distribution rows must have shape (n, 3)")
+    n = int(n)
+    if n <= 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    order = np.argsort(distribution_latent_score(arr), kind="mergesort")
+    q_offset = float(rng.random()) / max(n, 1)
+    quantiles = np.clip((np.arange(n, dtype=np.float64) + q_offset) / n, 0.0, 1.0)
+    source_positions = np.minimum((quantiles * len(order)).astype(np.int64), len(order) - 1)
+    chosen = order[source_positions]
+    return arr[chosen].astype(np.float32, copy=True)
+
+
+def bootstrap_joint_tissue_vector(rows: Any, rng: Any, n_bootstrap: int = 256) -> Any:
+    np = require_dependency("numpy", "pip install numpy")
+    arr = np.asarray(rows, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] != 3 or arr.shape[0] == 0:
+        raise ValueError("Region distribution rows must have shape (n, 3)")
+    n_bootstrap = max(1, int(n_bootstrap))
+    idx = rng.integers(0, arr.shape[0], size=n_bootstrap)
+    return arr[idx].mean(axis=0, dtype=np.float32)
+
+
+def median_std_joint_rows(
+    rows: Any,
+    n: int,
+    rng: Any,
+    scale: float = 0.05,
+    center_method: str = "median",
+) -> Any:
+    np = require_dependency("numpy", "pip install numpy")
+    arr = np.asarray(rows, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] != 3 or arr.shape[0] == 0:
+        raise ValueError("Region distribution rows must have shape (n, 3)")
+    n = int(n)
+    if n <= 0:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    if center_method == "mean":
+        center = np.nanmean(arr, axis=0).astype(np.float64)
+    elif center_method == "median":
+        center = np.nanmedian(arr, axis=0).astype(np.float64)
+    else:
+        raise ValueError("center_method must be 'mean' or 'median'")
+    if arr.shape[0] == 1:
+        return np.repeat(center[None, :], n, axis=0).astype(np.float32)
+
+    cov = np.asarray(np.cov(arr.astype(np.float64), rowvar=False), dtype=np.float64)
+    cov = np.atleast_2d(cov)
+    if cov.shape != (3, 3) or not np.all(np.isfinite(cov)):
+        std = np.nanstd(arr, axis=0).astype(np.float64)
+        cov = np.diag(std * std)
+    cov *= float(max(scale, 0.0)) ** 2
+    jitter = np.maximum(np.diag(cov), 1e-6) * 1e-4
+    cov += np.diag(jitter)
+
+    try:
+        samples = rng.multivariate_normal(center, cov, size=n)
+    except np.linalg.LinAlgError:
+        std = np.sqrt(np.maximum(np.diag(cov), 0.0))
+        samples = center[None, :] + rng.normal(size=(n, 3)) * std[None, :]
+
+    q01 = np.nanquantile(arr, 0.01, axis=0).astype(np.float64)
+    q99 = np.nanquantile(arr, 0.99, axis=0).astype(np.float64)
+    samples = np.clip(samples, q01, q99)
+    return samples.astype(np.float32)
+
+
+def spatially_coherent_joint_rows(
+    rows: Any,
+    keep_mask: Any,
+    rng: Any,
+    smoothing_sigma_vox: float = 2.0,
+    rank_jitter: float = 0.02,
+) -> Any:
+    np = require_dependency("numpy", "pip install numpy")
+    ndi = require_dependency("scipy.ndimage", "pip install scipy")
+    keep = np.asarray(keep_mask, dtype=bool)
+    n = int(np.count_nonzero(keep))
+    sampled = stratified_joint_rows(rows, n, rng)
+    if n <= 1 or smoothing_sigma_vox <= 0:
+        return sampled
+
+    field = rng.normal(size=keep.shape).astype(np.float32)
+    field = ndi.gaussian_filter(field, sigma=float(smoothing_sigma_vox))
+    field_values = field[keep]
+    if rank_jitter > 0:
+        field_values = field_values + float(rank_jitter) * rng.normal(size=n)
+
+    spatial_order = np.argsort(field_values, kind="mergesort")
+    sample_order = np.argsort(distribution_latent_score(sampled), kind="mergesort")
+    coherent = np.empty_like(sampled)
+    coherent[spatial_order] = sampled[sample_order]
+    return coherent.astype(np.float32, copy=False)
+
+
+def tissue_ranked_joint_rows(rows: Any, keep_mask: Any, fraction: Any, rng: Any) -> Any:
+    np = require_dependency("numpy", "pip install numpy")
+    keep = np.asarray(keep_mask, dtype=bool)
+    n = int(np.count_nonzero(keep))
+    sampled = stratified_joint_rows(rows, n, rng)
+    if n <= 1:
+        return sampled
+
+    score = tissue_rank_score(keep, fraction)[keep]
+    tissue_order = np.argsort(score, kind="mergesort")
+    sample_order = np.argsort(joint_principal_score(sampled), kind="mergesort")
+    ranked = np.empty_like(sampled)
+    ranked[tissue_order] = sampled[sample_order]
+    return ranked.astype(np.float32, copy=False)
 
 
 def stratified_parameter_values(values: Any, keep_mask: Any, fraction: Any, rng: Any) -> Any:
@@ -749,13 +991,38 @@ def distribution_latent_score(samples: Any) -> Any:
     return score
 
 
+def joint_principal_score(samples: Any) -> Any:
+    np = require_dependency("numpy", "pip install numpy")
+    arr = np.asarray(samples, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return np.zeros(0, dtype=np.float32)
+    if arr.shape[0] == 1:
+        return np.zeros(1, dtype=np.float32)
+    standardized = np.zeros_like(arr, dtype=np.float32)
+    for col in range(arr.shape[1]):
+        values = arr[:, col]
+        scale = float(np.nanstd(values))
+        if scale > 0:
+            standardized[:, col] = (values - float(np.nanmean(values))) / scale
+    cov = np.cov(standardized, rowvar=False)
+    try:
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        vector = eigvecs[:, int(np.argmax(eigvals))]
+        score = standardized @ vector.astype(np.float32)
+    except np.linalg.LinAlgError:
+        score = distribution_latent_score(arr)
+    if score.size and score[0] > score[-1]:
+        score = -score
+    return np.asarray(score, dtype=np.float32)
+
+
 def shrink_samples_to_region_center(pool_rows: Any, samples: Any, scale: float) -> Any:
     np = require_dependency("numpy", "pip install numpy")
     if scale >= 0.999:
         return np.asarray(samples, dtype=np.float32)
     pool = np.asarray(pool_rows, dtype=np.float32)
     sampled = np.asarray(samples, dtype=np.float32)
-    center = np.nanmedian(pool, axis=0).astype(np.float32)
+    center = np.nanmean(pool, axis=0).astype(np.float32)
     q01 = np.nanquantile(pool, 0.01, axis=0).astype(np.float32)
     q99 = np.nanquantile(pool, 0.99, axis=0).astype(np.float32)
     shrunk = center + float(scale) * (sampled - center)
@@ -891,6 +1158,92 @@ def validate_distribution_table(table: Any) -> None:
         raise ValueError(f"Distribution table is missing required columns: {missing}")
     if len(table) == 0:
         raise ValueError("Distribution table is empty")
+
+
+def write_parameter_case_metadata(
+    out_path: Path,
+    case_id: str,
+    maps: dict[str, Any],
+    support_mask: Any,
+    config: MidaParameterConfig,
+    region_labels: Any | None = None,
+) -> Path:
+    np = require_dependency("numpy", "pip install numpy")
+    support = np.asarray(support_mask, dtype=bool)
+    stats = {}
+    for name in ("CVR", "delay", "T"):
+        values = np.asarray(maps[name], dtype=np.float32)
+        inside = values[support & np.isfinite(values)]
+        stats[name] = {
+            "min": float(np.min(inside)) if inside.size else None,
+            "mean": float(np.mean(inside)) if inside.size else None,
+            "median": float(np.median(inside)) if inside.size else None,
+            "max": float(np.max(inside)) if inside.size else None,
+        }
+    payload = {
+        "case_id": case_id,
+        "parameter_sampling_mode": config.parameter_sampling_mode,
+        "distribution_path": str(config.distribution_path),
+        "joint_distribution_columns": ["CVR", "delay", "T"],
+        "partial_volume_strategy": "tissue_fraction_weighted_parameter_mixing",
+        "component_parameter_maps_saved_for_signal_level_pve": bool(
+            all(f"component_{param}_{region}" in maps for region in MIDA_REGION_LABELS for param in ("CVR", "delay", "T"))
+        ),
+        "component_fraction_min": float(config.component_fraction_min),
+        "tissue_bootstrap_samples_per_region": int(config.tissue_bootstrap_samples_per_region),
+        "sample_quantile_min": float(config.sample_quantile_min),
+        "sample_quantile_max": float(config.sample_quantile_max),
+        "spatial_smoothing_sigma_vox": float(config.spatial_smoothing_sigma_vox),
+        "rank_jitter": float(config.rank_jitter),
+        "within_tissue_variation_scale": float(config.within_tissue_variation_scale),
+        "delay_floor_inside_support_seconds": float(config.delay_floor_inside_support_seconds),
+        "parameter_post_smooth_sigma_vox": float(config.parameter_post_smooth_sigma_vox),
+        "parameter_post_smooth_blend": float(config.parameter_post_smooth_blend),
+        "support_voxels": int(np.count_nonzero(support)),
+        "parameter_stats_inside_support": stats,
+        "cvr_tissue_order_qc": cvr_tissue_order_qc(maps["CVR"], region_labels, support),
+        "notes": (
+            "GT parameter maps are simulator/evaluation artifacts only. They are not model "
+            "inputs and must not be used as supervised training targets."
+        ),
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return out_path
+
+
+def cvr_tissue_order_qc(cvr_map: Any, region_labels: Any | None, support_mask: Any) -> dict[str, Any]:
+    np = require_dependency("numpy", "pip install numpy")
+    expected_order = ["wm", "subcortical_gm", "cortical_gm", "vcsf", "vessel_like"]
+    if region_labels is None:
+        return {
+            "expected_low_to_high": expected_order,
+            "available": False,
+            "passes": None,
+            "region_means": {},
+            "observed_low_to_high": [],
+        }
+    labels = np.asarray(region_labels)
+    support = np.asarray(support_mask, dtype=bool)
+    cvr = np.asarray(cvr_map, dtype=np.float32)
+    means = {}
+    for region in expected_order:
+        mask = support & (labels == MIDA_REGION_LABELS[region]) & np.isfinite(cvr)
+        if np.any(mask):
+            means[region] = float(np.mean(cvr[mask]))
+    observed = sorted(means, key=means.get)
+    passes = all(
+        means[lo] <= means[hi]
+        for lo, hi in zip(expected_order[:-1], expected_order[1:], strict=True)
+        if lo in means and hi in means
+    )
+    return {
+        "expected_low_to_high": expected_order,
+        "available": True,
+        "passes": bool(passes),
+        "region_means": means,
+        "observed_low_to_high": observed,
+    }
 
 
 def save_nifti(data: Any, ref_img: Any, out_path: Path, dtype: Any) -> Path:

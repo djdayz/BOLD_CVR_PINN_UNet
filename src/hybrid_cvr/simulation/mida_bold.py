@@ -19,6 +19,8 @@ TISSUE_FRACTION_NAMES = (
     "vessel_like",
 )
 
+PARAMETER_NAMES = ("CVR", "delay", "T")
+
 FEATURE_NAMES = (
     "psc_mean",
     "psc_std",
@@ -45,9 +47,6 @@ class MidaBoldSimulationConfig:
         "block",
         "multi_step",
         "pseudo_random_binary",
-        "sinusoidal",
-        "breath_hold_like",
-        "resting_state_like",
     )
     slice_indices: tuple[int, ...] = field(default_factory=tuple)
     n_timepoints: int = 480
@@ -68,7 +67,7 @@ class MidaBoldSimulationConfig:
     drift_fraction_of_noise: float = 0.15
     motion_spike_probability: float = 0.015
     motion_spike_scale: float = 3.0
-    psc_spatial_smoothing_sigma_vox: float = 0.35
+    psc_spatial_smoothing_sigma_vox: float = 0.0
     baseline_intensity: float = 320.0
     baseline_bias_sd: float = 30.0
 
@@ -112,6 +111,11 @@ def simulate_mida_bold_dataset(config: MidaBoldSimulationConfig | None = None) -
             "vessel_likelihood": maps["vessel_likelihood"][:, :, z],
             "fractions": fraction_stack[:, :, :, z],
         }
+        for tissue in TISSUE_FRACTION_NAMES:
+            for param in PARAMETER_NAMES:
+                key = f"component_{param}_{tissue}"
+                if key in maps:
+                    slice_maps[key] = maps[key][:, :, z]
         mask = slice_maps["region_labels"] > 0
         if not np.any(mask):
             continue
@@ -125,13 +129,12 @@ def simulate_mida_bold_dataset(config: MidaBoldSimulationConfig | None = None) -
                 case_id = f"sim_{case_idx:03d}"
                 noise_seed = int(rng.integers(0, 2**31 - 1))
                 etco2_measured = add_etco2_measurement_error(etco2_clean, time_grid, config, noise_seed)
-                clean = simulate_bold_psc(
-                    slice_maps["GT_CVR"],
-                    slice_maps["GT_delay"],
-                    slice_maps["GT_T"],
-                    time_grid,
+                clean, pve_strategy = simulate_bold_psc_slice_from_maps(
+                    slice_maps,
                     etco2_clean,
-                )["bold_psc"]
+                    time_grid,
+                    mask,
+                )
                 clean = spatially_smooth_time_series(clean, config.psc_spatial_smoothing_sigma_vox, mask)
                 noisy, noise_summary = add_tcnr_noise(clean, mask, float(tcnr), config, noise_seed)
                 bold_intensity = baseline[None, :, :] * (1.0 + noisy / 100.0)
@@ -210,6 +213,7 @@ def simulate_mida_bold_dataset(config: MidaBoldSimulationConfig | None = None) -
                         "npz": str(npz_path),
                         "etco2_tsv": str(etco2_tsv),
                         "etco2_png": str(etco2_png),
+                        "partial_volume_signal_strategy": pve_strategy,
                         **gt_paths,
                     }
                 )
@@ -254,10 +258,8 @@ def simulate_mida_bold_volumes(
     for paradigm in config.paradigms:
         paradigm_seed = int(rng.integers(0, 2**31 - 1))
         etco2_clean = make_paradigm(paradigm, time_grid, seed=paradigm_seed).astype(np.float32)
-        clean = simulate_bold_psc_volume_chunked(
-            maps["CVR"],
-            maps["delay"],
-            maps["T"],
+        clean, pve_strategy = simulate_bold_psc_volume_from_maps(
+            maps,
             etco2_clean,
             time_grid,
             mask,
@@ -333,6 +335,7 @@ def simulate_mida_bold_volumes(
                     "source_GT_CVR": str(Path(config.parameter_case_dir) / "GT_CVR.nii.gz"),
                     "source_GT_delay": str(Path(config.parameter_case_dir) / "GT_delay.nii.gz"),
                     "source_GT_T": str(Path(config.parameter_case_dir) / "GT_T.nii.gz"),
+                    "partial_volume_signal_strategy": pve_strategy,
                     "boundary_uncertainty_source": "computed_from_GT_fraction_maps",
                     "mask_voxels": int(mask.sum()),
                     "shape_x": int(mask.shape[0]),
@@ -357,6 +360,11 @@ def simulate_mida_bold_volumes(
         "uses_gt_parameter_maps_internally_for_ode": True,
         "exports_gt_parameter_maps_per_simulation": False,
         "ode": "dy/dt = (CVR * delta_ETCO2(t - delay) - y) / T",
+        "partial_volume_signal_strategy": (
+            "signal_level_tissue_fraction_mixing"
+            if has_tissue_component_parameter_maps(maps)
+            else "parameter_level_parameter_map_fallback"
+        ),
         "shape": list(mask.shape),
         "timepoints": int(np.asarray(time_grid).size),
         "tr_seconds": float(config.tr_seconds),
@@ -365,6 +373,110 @@ def simulate_mida_bold_volumes(
     }
     (out_dir / "simulation_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return {"output_dir": out_dir, "summary": summary, "n_cases": len(rows)}
+
+
+def component_parameter_key(param: str, tissue: str) -> str:
+    return f"component_{param}_{tissue}"
+
+
+def has_tissue_component_parameter_maps(maps: dict[str, Any]) -> bool:
+    return all(component_parameter_key(param, tissue) in maps for tissue in TISSUE_FRACTION_NAMES for param in PARAMETER_NAMES)
+
+
+def simulate_bold_psc_slice_from_maps(
+    maps: dict[str, Any],
+    etco2_clean: Any,
+    time_grid: Any,
+    mask: Any,
+) -> tuple[Any, str]:
+    np = require_dependency("numpy", "pip install numpy")
+    m = np.asarray(mask, dtype=bool)
+    if not all(component_parameter_key(param, tissue) in maps for tissue in TISSUE_FRACTION_NAMES for param in PARAMETER_NAMES):
+        clean = simulate_bold_psc(
+            maps["GT_CVR"],
+            maps["GT_delay"],
+            maps["GT_T"],
+            time_grid,
+            etco2_clean,
+        )["bold_psc"]
+        return clean.astype(np.float32), "parameter_level_parameter_map_fallback"
+
+    fractions = np.asarray(maps["fractions"], dtype=np.float32)
+    n_time = int(np.asarray(time_grid).size)
+    out = np.zeros((n_time,) + m.shape, dtype=np.float32)
+    fraction_sum = np.sum(fractions, axis=0).astype(np.float32)
+    for tissue_index, tissue in enumerate(TISSUE_FRACTION_NAMES):
+        frac = fractions[tissue_index]
+        tissue_mask = m & (frac > 1e-6)
+        if not np.any(tissue_mask):
+            continue
+        tissue_response = simulate_bold_psc(
+            maps[component_parameter_key("CVR", tissue)],
+            maps[component_parameter_key("delay", tissue)],
+            maps[component_parameter_key("T", tissue)],
+            time_grid,
+            etco2_clean,
+        )["bold_psc"]
+        tissue_response[:, ~tissue_mask] = 0.0
+        out += tissue_response.astype(np.float32) * frac[None, :, :]
+    out = np.divide(
+        out,
+        fraction_sum[None, :, :],
+        out=np.zeros_like(out, dtype=np.float32),
+        where=fraction_sum[None, :, :] > 1e-6,
+    )
+    out[:, ~m] = 0.0
+    return out.astype(np.float32), "signal_level_tissue_fraction_mixing"
+
+
+def simulate_bold_psc_volume_from_maps(
+    maps: dict[str, Any],
+    etco2_clean: Any,
+    time_grid: Any,
+    mask: Any,
+    chunk_voxels: int = 50000,
+) -> tuple[Any, str]:
+    np = require_dependency("numpy", "pip install numpy")
+    m = np.asarray(mask, dtype=bool)
+    if not has_tissue_component_parameter_maps(maps):
+        clean = simulate_bold_psc_volume_chunked(
+            maps["CVR"],
+            maps["delay"],
+            maps["T"],
+            etco2_clean,
+            time_grid,
+            m,
+            chunk_voxels=chunk_voxels,
+        )
+        return clean.astype(np.float32), "parameter_level_parameter_map_fallback"
+
+    time = np.asarray(time_grid, dtype=np.float32)
+    out = np.zeros(m.shape + (time.size,), dtype=np.float32)
+    fraction_sum = np.zeros(m.shape, dtype=np.float32)
+    for tissue in TISSUE_FRACTION_NAMES:
+        frac = np.asarray(maps[f"fraction_{tissue}"], dtype=np.float32)
+        tissue_mask = m & (frac > 1e-6)
+        if not np.any(tissue_mask):
+            continue
+        tissue_response = simulate_bold_psc_volume_chunked(
+            maps[component_parameter_key("CVR", tissue)],
+            maps[component_parameter_key("delay", tissue)],
+            maps[component_parameter_key("T", tissue)],
+            etco2_clean,
+            time,
+            tissue_mask,
+            chunk_voxels=chunk_voxels,
+        )
+        out += tissue_response.astype(np.float32) * frac[..., None]
+        fraction_sum += np.where(tissue_mask, frac, 0.0).astype(np.float32)
+    out = np.divide(
+        out,
+        fraction_sum[..., None],
+        out=np.zeros_like(out, dtype=np.float32),
+        where=fraction_sum[..., None] > 1e-6,
+    )
+    out[~m, :] = 0.0
+    return out.astype(np.float32), "signal_level_tissue_fraction_mixing"
 
 
 def load_mida_parameter_case(case_dir: Path) -> tuple[dict[str, Any], Any]:
@@ -379,6 +491,11 @@ def load_mida_parameter_case(case_dir: Path) -> tuple[dict[str, Any], Any]:
     }
     for name in TISSUE_FRACTION_NAMES:
         paths[f"fraction_{name}"] = case_dir / f"GT_fraction_{name}.nii.gz"
+    for tissue in TISSUE_FRACTION_NAMES:
+        for param in PARAMETER_NAMES:
+            path = case_dir / f"GT_component_{param}_{tissue}.nii.gz"
+            if path.exists():
+                paths[component_parameter_key(param, tissue)] = path
     missing = [str(path) for path in paths.values() if not path.exists()]
     if missing:
         raise FileNotFoundError("Missing MIDA parameter files: " + ", ".join(missing))

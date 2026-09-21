@@ -16,17 +16,18 @@ mida:
     vcsf: [6]
     vessel_like: [24, 25]
 mida_parameter_maps:
-  distribution_path: data/distributions/tissue_parameter_samples.parquet
+  distribution_path: data/distributions/eroded_iterative_min500/tissue_parameter_samples.parquet
   mida_dir: data/derivatives/mida/2p5mm
   highres_dir: data/derivatives/mida/highres
   output_dir: data/simulated/mida_parameters
   n_cases: 100
   seed: 17
   component_fraction_min: 0.005
-  parameter_sampling_mode: subvoxel_monte_carlo
+  parameter_sampling_mode: joint_3d_mean_std
   sample_quantile_min: 0.0
   sample_quantile_max: 1.0
   subvoxel_samples_per_lowres_voxel: 125
+  tissue_bootstrap_samples_per_region: 256
   parameter_patch_size_vox: [1, 1, 1]
   delay_sampling_mode: same_as_parameter
   delay_sample_quantile_min: 0.0
@@ -36,9 +37,10 @@ mida_parameter_maps:
   T_sample_quantile_max: 1.0
   parameter_post_smooth_sigma_vox: 0.0
   parameter_post_smooth_blend: 0.0
-  spatial_smoothing_sigma_vox: 5.0
+  spatial_smoothing_sigma_vox: 0.0
   rank_jitter: 0.0
-  within_tissue_variation_scale: 1.0
+  within_tissue_variation_scale: 0.05
+  delay_floor_inside_support_seconds: 1.55
   save_highres_case_indices: []
   save_fsleyes_canonical: true
 phantom:
@@ -51,7 +53,7 @@ mida_bold_simulation:
   parameter_case_dir: data/simulated/mida_parameters/case_000
   output_mode: volume4d
   tcnr_levels: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
-  paradigms: [block, multi_step, pseudo_random_binary, sinusoidal, breath_hold_like, resting_state_like]
+  paradigms: [block, multi_step, pseudo_random_binary]
   slice_indices: []
   n_timepoints: 480
   tr_seconds: 1.55
@@ -71,9 +73,9 @@ mida_bold_simulation:
   drift_fraction_of_noise: 0.15
   motion_spike_probability: 0.015
   motion_spike_scale: 3.0
-  psc_spatial_smoothing_sigma_vox: 0.35
+  psc_spatial_smoothing_sigma_vox: 0.0
   baseline_intensity: 320.0
-  baseline_bias_sd: 30.0
+  baseline_bias_sd: 0.0
 qc:
   cvr_min: -0.4
   cvr_max: 1.8
@@ -88,4 +90,15 @@ distribution_pooling:
   include_whole_brain: true
   include_boundary_region: true
   max_voxels_per_region_session: 10000
+  high_confidence_tissue_interiors: false
+  use_core_masks_for_tissue_interiors: false
+  erode_tissue_masks_once: false
+  erode_tissue_masks_until_too_small: true
+  max_tissue_erosion_iterations: 20
+  min_eroded_voxels_per_region_session: 500
+  min_voxels_per_region_session: 50
+  tissue_vessel_likelihood_max_levels: [0.05, 0.10, 0.20, 1.0]
+  tissue_boundary_uncertainty_quantile_levels: [0.80, 0.90, 0.95, 1.0]
+  tissue_tcnr_min_levels: [0.5, 0.0]
+  tissue_r2_min_levels: [0.10, 0.05]
   random_seed: 17

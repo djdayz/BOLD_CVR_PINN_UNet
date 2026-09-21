@@ -18,12 +18,15 @@ def interpolate_delayed_1d(etco2, time_grid, delay_map):
     time = time_grid.to(device=delay_map.device, dtype=delay_map.dtype)
     source = etco2.to(device=delay_map.device, dtype=delay_map.dtype)
     if n_time == 1:
-        query = time.view(1, 1, 1, 1) - delay_map.unsqueeze(1)
+        query_shape = (1, 1) + (1,) * (delay_map.ndim - 1)
+        query = time.view(query_shape) - delay_map.unsqueeze(1)
         valid = (query >= time[0]) & (query <= time[0])
-        return torch.where(valid, source[:, 0].view(batch, 1, 1, 1), torch.zeros_like(query))
+        source_shape = (batch, 1) + (1,) * (delay_map.ndim - 1)
+        return torch.where(valid, source[:, 0].view(source_shape), torch.zeros_like(query))
 
     dt = (time[-1] - time[0]) / max(n_time - 1, 1)
-    query = time.view(1, n_time, 1, 1) - delay_map.unsqueeze(1)
+    query_shape = (1, n_time) + (1,) * (delay_map.ndim - 1)
+    query = time.view(query_shape) - delay_map.unsqueeze(1)
     idx_float = (query - time[0]) / dt.clamp_min(1e-6)
     idx0_raw = torch.floor(idx_float)
     alpha = (idx_float - idx0_raw).clamp(0.0, 1.0)

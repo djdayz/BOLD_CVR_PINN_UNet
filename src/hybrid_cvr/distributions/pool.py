@@ -19,6 +19,17 @@ class DistributionPoolConfig:
     max_voxels_per_region_session: int | None = None
     include_whole_brain: bool = True
     include_boundary_region: bool = True
+    high_confidence_tissue_interiors: bool = True
+    use_core_masks_for_tissue_interiors: bool = False
+    erode_tissue_masks_once: bool = False
+    erode_tissue_masks_until_too_small: bool = False
+    max_tissue_erosion_iterations: int = 20
+    min_eroded_voxels_per_region_session: int = 50
+    min_voxels_per_region_session: int = 50
+    tissue_vessel_likelihood_max_levels: tuple[float, ...] = (0.05, 0.10, 0.20, 1.0)
+    tissue_boundary_uncertainty_quantile_levels: tuple[float, ...] = (0.80, 0.90, 0.95, 1.0)
+    tissue_tcnr_min_levels: tuple[float, ...] = (0.5, 0.0)
+    tissue_r2_min_levels: tuple[float, ...] = (0.10, 0.05)
     random_seed: int = 17
 
 
@@ -28,6 +39,14 @@ REGION_MASK_FILES = {
     "wm": "wm_mask_exclusive_no_vessel.nii.gz",
     "vcsf": "vcsf_mask_exclusive_no_vessel.nii.gz",
     "vessel_like_high_confidence": "vessel_mask_high_confidence.nii.gz",
+}
+
+
+REGION_CORE_FILES = {
+    "cortical_gm": "cortical_gm_core.nii.gz",
+    "subcortical_gm": "subcortical_gm_core.nii.gz",
+    "wm": "wm_core.nii.gz",
+    "vcsf": "csf_core.nii.gz",
 }
 
 
@@ -161,6 +180,8 @@ def pool_session_parameter_rows(
         "T": _load_like(real_fit_dir / "hrf_T.nii.gz", ref_img),
         "tCNR": _load_like(real_fit_dir / "tCNR.nii.gz", ref_img),
         "R2": _load_like(real_fit_dir / "hrf_r2.nii.gz", ref_img),
+        "RMSE": _load_like(real_fit_dir / "hrf_rmse.nii.gz", ref_img),
+        "SSR": _load_like(real_fit_dir / "hrf_ssr.nii.gz", ref_img),
         "vessel_likelihood": _load_like(mask_dir / "vessel_likelihood.nii.gz", ref_img),
         "effective_delay": _load_like(real_fit_dir / "hrf_effective_delay.nii.gz", ref_img),
         "glm_CVR": _load_like(real_fit_dir / "glm_cvr.nii.gz", ref_img),
@@ -197,9 +218,15 @@ def pool_session_parameter_rows(
 
     rows = []
     for region, region_mask in region_masks.items():
-        keep = np.asarray(region_mask) > 0
-        keep &= valid_fit
-        keep &= qc_filter(maps, config)
+        keep, filter_level = high_confidence_region_keep(
+            region,
+            np.asarray(region_mask) > 0,
+            valid_fit,
+            maps,
+            segmentation_dir,
+            ref_img,
+            config,
+        )
         indices = np.flatnonzero(keep)
         if (
             config.max_voxels_per_region_session is not None
@@ -213,6 +240,7 @@ def pool_session_parameter_rows(
             "subject": np.repeat(subject, indices.size),
             "session": np.repeat(session, indices.size),
             "region": np.repeat(region, indices.size),
+            "pool_filter_level": np.repeat(filter_level, indices.size),
             "i": coords[:, 0].astype(np.int16),
             "j": coords[:, 1].astype(np.int16),
             "k": coords[:, 2].astype(np.int16),
@@ -230,6 +258,123 @@ def load_region_masks(mask_dir: Path, reference_img: Any) -> dict[str, Any]:
         region: _load_like(mask_dir / filename, reference_img) > 0
         for region, filename in REGION_MASK_FILES.items()
     }
+
+
+def high_confidence_region_keep(
+    region: str,
+    region_mask: Any,
+    valid_fit: Any,
+    maps: dict[str, Any],
+    segmentation_dir: Path,
+    reference_img: Any,
+    config: DistributionPoolConfig,
+) -> tuple[Any, str]:
+    np = require_dependency("numpy", "pip install numpy")
+    base = np.asarray(region_mask, dtype=bool)
+    base &= np.asarray(valid_fit, dtype=bool)
+    base &= qc_filter(maps, config)
+    if not np.any(base):
+        return base, "empty_after_basic_qc"
+    if (config.erode_tissue_masks_once or config.erode_tissue_masks_until_too_small) and region not in {
+        "vessel_like_high_confidence",
+        "whole_brain_no_high_conf_vessel",
+        "boundary_partial_volume",
+    }:
+        eroded, n_iter = deepest_usable_erosion(
+            region_mask,
+            valid_fit,
+            maps,
+            config,
+        )
+        if n_iter > 0:
+            return eroded, f"{n_iter}_erosion_basic_qc"
+        if not config.high_confidence_tissue_interiors:
+            return base, "erosion_too_small_fallback_basic_qc"
+    if not config.high_confidence_tissue_interiors:
+        return base, "basic_qc"
+    if region in {"whole_brain_no_high_conf_vessel", "boundary_partial_volume"}:
+        return base, "basic_qc"
+    if region == "vessel_like_high_confidence":
+        vessel = np.asarray(maps["vessel_likelihood"], dtype=np.float32)
+        for q in (0.90, 0.80, 0.70, 0.50, 0.0):
+            threshold = float(np.nanquantile(vessel[base & np.isfinite(vessel)], q))
+            keep = base & np.isfinite(vessel) & (vessel >= threshold)
+            if np.count_nonzero(keep) >= config.min_voxels_per_region_session:
+                return keep, f"vessel_likelihood_q{q:.2f}"
+        return base, "vessel_high_conf_mask_basic_qc"
+
+    core = load_optional_core_mask(region, segmentation_dir, reference_img) if config.use_core_masks_for_tissue_interiors else None
+    core_candidates = [True, False] if core is not None and np.any(base & core) else [False]
+    boundary = np.asarray(maps["boundary_uncertainty"], dtype=np.float32)
+    vessel = np.asarray(maps["vessel_likelihood"], dtype=np.float32)
+    tcnr = np.asarray(maps["tCNR"], dtype=np.float32)
+    r2 = np.asarray(maps["R2"], dtype=np.float32)
+
+    for use_core in core_candidates:
+        core_base = base & core if use_core else base
+        if not np.any(core_base):
+            continue
+        valid_boundary = core_base & np.isfinite(boundary)
+        for boundary_q in config.tissue_boundary_uncertainty_quantile_levels:
+            if np.any(valid_boundary) and boundary_q < 1.0:
+                boundary_threshold = float(np.nanquantile(boundary[valid_boundary], boundary_q))
+            else:
+                boundary_threshold = np.inf
+            for vessel_max in config.tissue_vessel_likelihood_max_levels:
+                for tcnr_min in config.tissue_tcnr_min_levels:
+                    for r2_min in config.tissue_r2_min_levels:
+                        keep = core_base.copy()
+                        keep &= np.isfinite(boundary) & (boundary <= boundary_threshold)
+                        keep &= np.isfinite(vessel) & (vessel <= float(vessel_max))
+                        keep &= np.isfinite(tcnr) & (tcnr >= float(tcnr_min))
+                        keep &= np.isfinite(r2) & (r2 >= max(float(r2_min), float(config.r2_min)))
+                        if np.count_nonzero(keep) >= config.min_voxels_per_region_session:
+                            return (
+                                keep,
+                                f"{'core' if use_core else 'mask'}_vessel{vessel_max:g}_"
+                                f"boundaryq{boundary_q:g}_tcnr{tcnr_min:g}_r2{r2_min:g}",
+                            )
+    return base, "fallback_basic_qc"
+
+
+def deepest_usable_erosion(
+    mask: Any,
+    valid_fit: Any,
+    maps: dict[str, Any],
+    config: DistributionPoolConfig,
+) -> tuple[Any, int]:
+    ndi = require_dependency("scipy.ndimage", "pip install scipy")
+    np = require_dependency("numpy", "pip install numpy")
+    current = np.asarray(mask, dtype=bool)
+    valid_fit_mask = np.asarray(valid_fit, dtype=bool)
+    basic_qc = qc_filter(maps, config)
+    best = np.zeros_like(current, dtype=bool)
+    best_iter = 0
+    max_iter = (
+        max(1, int(config.max_tissue_erosion_iterations))
+        if config.erode_tissue_masks_until_too_small
+        else 1
+    )
+    for iteration in range(1, max_iter + 1):
+        current = ndi.binary_erosion(current, iterations=1)
+        if not np.any(current):
+            break
+        keep = current & valid_fit_mask & basic_qc
+        if np.count_nonzero(keep) < config.min_eroded_voxels_per_region_session:
+            break
+        best = keep
+        best_iter = iteration
+    return best, best_iter
+
+
+def load_optional_core_mask(region: str, segmentation_dir: Path, reference_img: Any) -> Any | None:
+    filename = REGION_CORE_FILES.get(region)
+    if filename is None:
+        return None
+    path = segmentation_dir / filename
+    if not path.exists():
+        return None
+    return _load_like(path, reference_img) > 0
 
 
 def qc_filter(maps: dict[str, Any], config: DistributionPoolConfig) -> Any:

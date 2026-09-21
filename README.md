@@ -333,7 +333,7 @@ catastrophic forgetting and a checkpoint specialized to recent conditions.
 Each batch randomly samples:
 
 - parameter-map case ID from the training split
-- axial slice
+- overlapping 3D brain patch with the complete 480-point time series
 - ETCO2 paradigm
 - tCNR level
 - noise seed
@@ -344,28 +344,36 @@ Each batch randomly samples:
 Validation uses held-out validation parameter-map cases with fixed
 seeds/configs, so validation losses are comparable across epochs. Checkpoint
 selection uses self-supervised validation losses only, not GT parameter metrics.
+The primary temporal-hybrid experiment additionally uses synthetic GT parameter
+losses on training cases only. It is therefore simulation-supervised/hybrid,
+not unsupervised. The physics-only configuration remains available as an
+ablation.
 
 Testing uses held-out test parameter-map cases. GT maps are allowed only here for
 final metrics and plots.
 
-The current full-brain config is:
+The current temporal-hybrid config is:
 
 ```text
-configs/train_unet_pinn_fullbrain_T_recovery.yaml
+configs/train_temporal_hybrid_3d.yaml
 ```
 
 Key settings:
 
 ```text
-slice_index_range: [0, 93]
+patch size: 32 x 32 x 24 at 2.5 mm
+temporal input: complete 480-point BOLD PSC + ETCO2 + time
+temporal encoder: shared strided 1D CNN, 32-channel voxel embedding
+spatial model: 3D U-Net with parameter-specific residual decoders
+parameterization: log(g), log(k), delay; T=1/k and CVR=g/k
 train cases: 60
 validation cases: 20
 test cases: 20
-epochs: 360
-stage 1: 40 epochs, clean/high-tCNR warm-up
-stage 2: 80 epochs, physics/tissuewise T
-stage 3: 180 epochs, robust mixed conditions/voxelwise T
-stage 4: 60 epochs, low-tCNR stress conditions/voxelwise T
+epochs: 400
+stage 1: 60 epochs, clean/high-tCNR identification
+stage 2: 100 epochs, normalized timing/physics losses
+stage 3: 200 epochs, robust mixed conditions
+stage 4: 40 epochs, low-tCNR stress with clean/moderate replay
 learning rate scheduler: none
 checkpoint metric: self-supervised validation loss
 ```
@@ -393,7 +401,7 @@ best_checkpoint: data/models/unet_pinn_fullbrain_T_recovery/best.pt
 device: cuda
 train_cases: 60
 validation_cases: 20
-feature_channels: 15
+feature_channels: 15  # historical run before temporal-response feature channels
 ```
 
 Pulled prediction counts:
