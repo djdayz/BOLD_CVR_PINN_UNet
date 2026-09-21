@@ -145,11 +145,14 @@ def _mida_parameter_config(cfg: dict) -> object:
         n_cases=int(map_cfg.get("n_cases", 1)),
         seed=int(map_cfg.get("seed", 17)),
         component_fraction_min=float(map_cfg.get("component_fraction_min", 0.005)),
-        parameter_sampling_mode=str(map_cfg.get("parameter_sampling_mode", "subvoxel_monte_carlo")),
+        parameter_sampling_mode=str(map_cfg.get("parameter_sampling_mode", "joint_3d_mean_std")),
         sample_quantile_min=float(map_cfg.get("sample_quantile_min", 0.0)),
         sample_quantile_max=float(map_cfg.get("sample_quantile_max", 1.0)),
         subvoxel_samples_per_lowres_voxel=int(
             map_cfg.get("subvoxel_samples_per_lowres_voxel", 125)
+        ),
+        tissue_bootstrap_samples_per_region=int(
+            map_cfg.get("tissue_bootstrap_samples_per_region", 256)
         ),
         parameter_patch_size_vox=tuple(int(v) for v in map_cfg.get("parameter_patch_size_vox", [1, 1, 1])),
         delay_sampling_mode=str(map_cfg.get("delay_sampling_mode", "same_as_parameter")),
@@ -160,9 +163,10 @@ def _mida_parameter_config(cfg: dict) -> object:
         T_sample_quantile_max=float(map_cfg.get("T_sample_quantile_max", 1.0)),
         parameter_post_smooth_sigma_vox=float(map_cfg.get("parameter_post_smooth_sigma_vox", 0.0)),
         parameter_post_smooth_blend=float(map_cfg.get("parameter_post_smooth_blend", 0.0)),
-        spatial_smoothing_sigma_vox=float(map_cfg.get("spatial_smoothing_sigma_vox", 5.0)),
+        spatial_smoothing_sigma_vox=float(map_cfg.get("spatial_smoothing_sigma_vox", 0.0)),
         rank_jitter=float(map_cfg.get("rank_jitter", 0.0)),
-        within_tissue_variation_scale=float(map_cfg.get("within_tissue_variation_scale", 1.0)),
+        within_tissue_variation_scale=float(map_cfg.get("within_tissue_variation_scale", 0.05)),
+        delay_floor_inside_support_seconds=float(map_cfg.get("delay_floor_inside_support_seconds", 1.55)),
         save_highres_case_indices=tuple(int(v) for v in save_highres),
         save_fsleyes_canonical=bool(map_cfg.get("save_fsleyes_canonical", True)),
     )
@@ -180,7 +184,7 @@ def _mida_bold_simulation_config(cfg: dict, out: Path) -> object:
         output_dir=Path(out),
         output_mode=str(sim_cfg.get("output_mode", "volume4d")),
         tcnr_levels=tuple(float(v) for v in sim_cfg.get("tcnr_levels", cfg.get("noise_levels_tcnr", [0.5, 1.0, 2.0, 5.0]))),
-        paradigms=tuple(str(v) for v in sim_cfg.get("paradigms", ["block", "multi_step"])),
+        paradigms=tuple(str(v) for v in sim_cfg.get("paradigms", ["block", "multi_step", "pseudo_random_binary"])),
         slice_indices=tuple(int(v) for v in sim_cfg.get("slice_indices", [])),
         n_timepoints=int(sim_cfg.get("n_timepoints", 480)),
         tr_seconds=float(sim_cfg.get("tr_seconds", 1.55)),
@@ -200,7 +204,7 @@ def _mida_bold_simulation_config(cfg: dict, out: Path) -> object:
         drift_fraction_of_noise=float(sim_cfg.get("drift_fraction_of_noise", 0.15)),
         motion_spike_probability=float(sim_cfg.get("motion_spike_probability", 0.015)),
         motion_spike_scale=float(sim_cfg.get("motion_spike_scale", 3.0)),
-        psc_spatial_smoothing_sigma_vox=float(sim_cfg.get("psc_spatial_smoothing_sigma_vox", 0.35)),
+        psc_spatial_smoothing_sigma_vox=float(sim_cfg.get("psc_spatial_smoothing_sigma_vox", 0.0)),
         baseline_intensity=float(sim_cfg.get("baseline_intensity", 1000.0)),
         baseline_bias_sd=float(sim_cfg.get("baseline_bias_sd", 60.0)),
     )
@@ -1180,6 +1184,25 @@ if typer is not None:
             ),
             include_whole_brain=bool(pool_cfg.get("include_whole_brain", True)),
             include_boundary_region=bool(pool_cfg.get("include_boundary_region", True)),
+            high_confidence_tissue_interiors=bool(pool_cfg.get("high_confidence_tissue_interiors", True)),
+            use_core_masks_for_tissue_interiors=bool(pool_cfg.get("use_core_masks_for_tissue_interiors", False)),
+            erode_tissue_masks_once=bool(pool_cfg.get("erode_tissue_masks_once", False)),
+            erode_tissue_masks_until_too_small=bool(pool_cfg.get("erode_tissue_masks_until_too_small", False)),
+            max_tissue_erosion_iterations=int(pool_cfg.get("max_tissue_erosion_iterations", 20)),
+            min_eroded_voxels_per_region_session=int(pool_cfg.get("min_eroded_voxels_per_region_session", 50)),
+            min_voxels_per_region_session=int(pool_cfg.get("min_voxels_per_region_session", 50)),
+            tissue_vessel_likelihood_max_levels=tuple(
+                float(v) for v in pool_cfg.get("tissue_vessel_likelihood_max_levels", [0.05, 0.10, 0.20, 1.0])
+            ),
+            tissue_boundary_uncertainty_quantile_levels=tuple(
+                float(v)
+                for v in pool_cfg.get(
+                    "tissue_boundary_uncertainty_quantile_levels",
+                    [0.80, 0.90, 0.95, 1.0],
+                )
+            ),
+            tissue_tcnr_min_levels=tuple(float(v) for v in pool_cfg.get("tissue_tcnr_min_levels", [0.5, 0.0])),
+            tissue_r2_min_levels=tuple(float(v) for v in pool_cfg.get("tissue_r2_min_levels", [0.10, 0.05])),
             random_seed=int(pool_cfg.get("random_seed", 17)),
         )
         records = list(read_manifest(manifest))
@@ -1341,6 +1364,39 @@ if typer is not None:
         else:
             _write_status(out, f"Saved-NPZ training scaffold checked {sim_root}.")
             console.print(f"Wrote training status to {out}")
+
+    @app.command("oracle-identifiability")
+    def oracle_identifiability(
+        out: Path = typer.Option(Path("data/qc/oracle_identifiability"), "--out"),
+        quick: bool = typer.Option(False, "--quick"),
+        plot: bool = typer.Option(True, "--plot/--no-plot"),
+    ) -> None:
+        from hybrid_cvr.experiments.oracle_identifiability import (
+            OracleIdentifiabilityConfig,
+            run_oracle_identifiability,
+        )
+
+        if quick:
+            cfg = OracleIdentifiabilityConfig(
+                output_dir=out,
+                paradigms=("block", "pseudo_random_binary"),
+                tcnr_levels=(2.0, 10.0),
+                noise_seeds=(17,),
+                cvr_values=(0.20,),
+                delay_values=(10.0, 35.0),
+                T_values=(20.0, 55.0),
+                n_timepoints=220,
+                fit_steps=25,
+                profile_limit=0,
+                plot=plot,
+            )
+        else:
+            cfg = OracleIdentifiabilityConfig(output_dir=out, plot=plot)
+        result = run_oracle_identifiability(cfg)
+        console.print(
+            f"Oracle identifiability complete: n={result['n_cases']} "
+            f"metrics={result['metrics']} summary={result['summary']}"
+        )
 
     @app.command("evaluate")
     def evaluate(

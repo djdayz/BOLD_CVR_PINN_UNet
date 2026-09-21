@@ -26,9 +26,6 @@ dataset:
     - block
     - multi_step
     - pseudo_random_binary
-    - sinusoidal
-    - breath_hold_like
-    - resting_state_like
   tcnr_levels: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
   etco2_input: measured
   temporal_mode: windowed
@@ -64,7 +61,7 @@ model:
   depth: 3
   norm: instance
   dropout: 0.05
-  T_mode: tissuewise
+  T_mode: voxelwise
   uncertainty: true
 
 parameter_ranges:
@@ -79,7 +76,7 @@ losses:
   lambda_recon: 1.0
   lambda_residual: 0.25
   lambda_uncertainty: 0.1
-  lambda_smooth: 0.05
+  lambda_smooth: 0.0
   lambda_prior: 0.01
   lambda_consistency: 0.05
 
@@ -118,12 +115,12 @@ stages:
     etco2_input: clean
     paradigms: [block, multi_step]
     temporal_mode: windowed
-    T_mode: global
+    T_mode: voxelwise
     losses:
       recon: 1.0
       residual: 0.0
       uncertainty: 0.0
-      smooth: 0.01
+      smooth: 0.0
       prior: 0.01
       consistency: 0.0
 
@@ -133,12 +130,12 @@ stages:
     etco2_input: measured
     paradigms: [block, multi_step, pseudo_random_binary]
     temporal_mode: transition_weighted
-    T_mode: tissuewise
+    T_mode: voxelwise
     losses:
       recon: 1.0
       residual: 0.5
       uncertainty: 0.0
-      smooth: 0.05
+      smooth: 0.0
       prior: 0.1
       consistency: 0.1
 
@@ -150,16 +147,13 @@ stages:
       - block
       - multi_step
       - pseudo_random_binary
-      - sinusoidal
-      - breath_hold_like
-      - resting_state_like
     temporal_mode: mixed
-    T_mode: tissuewise
+    T_mode: voxelwise
     losses:
       recon: 1.0
       residual: 0.5
       uncertainty: 0.05
-      smooth: 0.05
+      smooth: 0.0
       prior: 0.15
       consistency: 0.2
 
@@ -172,16 +166,13 @@ stages:
       - block
       - multi_step
       - pseudo_random_binary
-      - sinusoidal
-      - breath_hold_like
-      - resting_state_like
     temporal_mode: mixed
-    T_mode: tissuewise
+    T_mode: voxelwise
     losses:
       recon: 1.0
       residual: 0.5
       uncertainty: 0.05
-      smooth: 0.05
+      smooth: 0.0
       prior: 0.15
       consistency: 0.2
 

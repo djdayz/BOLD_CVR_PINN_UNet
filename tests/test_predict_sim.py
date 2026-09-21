@@ -59,14 +59,10 @@ def _tiny_config(tmp_path):
             "num_workers": 0,
             "use_amp": False,
             "gradient_clip_norm": 1.0,
-            "use_supervised_parameter_loss": False,
         },
         "losses": {
-            "lambda_recon": 1.0,
-            "lambda_residual": 0.0,
-            "lambda_uncertainty": 0.0,
-            "lambda_smooth": 0.0,
-            "lambda_prior": 0.0,
+            "lambda_data": 1.0,
+            "lambda_view": 0.0,
         },
     }
 
@@ -89,6 +85,9 @@ def test_predict_sim_writes_predicted_parameter_maps(tmp_path):
 
     assert pred["processed_slices"] == 3
     for name in [
+        "GT_CVR",
+        "GT_delay",
+        "GT_T",
         "predicted_CVR",
         "predicted_delay",
         "predicted_T",

@@ -2,31 +2,19 @@ features:
   input_mode: minimal
   use_gt_maps_as_input: false
 
-simulation_storage:
-  save_full_4d: false
-  save_qc_examples: true
-  qc_examples_per_paradigm: 1
-  training_format: on_the_fly
-  cache_feature_maps: false
-  cache_full_bold: false
-
 dataset:
   sim_root: data/simulated
   case_index_path: data/simulated/case_index.csv
   split_json_path: data/simulated/splits/train_val_test_split.json
   split_fractions: [0.6, 0.2, 0.2]
   split_seed_offsets: [0, 100000, 200000]
-  samples_per_epoch: 21
+  samples_per_epoch: 42
   simulation_backend: torch_gpu
-  slice_mode: full_volume
-  slice_axis: axial
-  slice_index_range:
+  slice_mode: 3d_patch
+  patch_size: [32, 32, 24]
   n_timepoints: 480
   tr_seconds: 1.55
-  paradigms:
-    - block
-    - multi_step
-    - pseudo_random_binary
+  paradigms: [block, multi_step, pseudo_random_binary]
   tcnr_levels: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
   etco2_input: measured
   temporal_mode: full
@@ -55,20 +43,24 @@ testing:
   save_predicted_parameter_maps: true
 
 model:
-  name: HybridUNetPINN
+  name: TemporalHybridUNetPINN
+  architecture: temporal_hybrid_3d
+  parameterization: log_g_log_k
   in_channels: auto
   spatial_dims: 3
-  base_channels: 32
-  debug_base_channels: 16
+  base_channels: 24
   depth: 3
   norm: instance
   dropout: 0.05
+  temporal_embedding_channels: 32
+  g_min: 0.00001
+  g_max: 0.9
+  k_min: 0.01
+  k_max: 0.5
   T_mode: voxelwise
-  T_residual_scale: 25.0
-  uncertainty: true
 
 parameter_ranges:
-  cvr_min: -0.4
+  cvr_min: 0.0
   cvr_max: 1.8
   delay_min: 0.0
   delay_max: 80.0
@@ -77,14 +69,20 @@ parameter_ranges:
 
 losses:
   lambda_recon: 1.0
-  lambda_residual: 0.5
-  lambda_uncertainty: 0.1
-  lambda_smooth: 0.0
-  lambda_prior: 0.01
-  lambda_consistency: 0.0
-  lambda_tissue_order: 0.02
+  lambda_residual: 0.0
   lambda_integral: 0.0
   lambda_spectral: 0.0
+  lambda_uncertainty: 0.0
+  lambda_smooth: 0.0
+  lambda_prior: 0.0
+  lambda_supervised: 0.0
+  lambda_consistency: 0.0
+  lambda_tissue_order: 0.0
+  recon_scale: 30.0
+  residual_scale: 1.5
+  integral_scale: 25.0
+  spectral_scale: 0.1
+  prior_scale: 3.0
   ode_residual_target: denoised_observed
 
 optimizer:
@@ -94,12 +92,10 @@ optimizer:
 
 scheduler:
   name: none
-  factor: 1.0
-  patience: 999999
 
 training:
-  use_supervised_parameter_loss: false
-  batch_size: 1
+  use_supervised_parameter_loss: true
+  batch_size: 4
   gradient_accumulation_steps: 1
   num_workers: 4
   validation_num_workers: 2
@@ -107,101 +103,101 @@ training:
   persistent_workers: true
   prefetch_factor: 1
   use_amp: true
-  max_epochs: 620
+  max_epochs: 400
   gradient_clip_norm: 1.0
   save_every_epochs: 5
   validate_every_epochs: 1
-  temporal_mode: full
-  temporal_window_length: 480
-  temporal_windows_per_sample: 1
-  prefer_transition_windows: true
   reset_optimizer_on_stage_boundary_resume: true
 
 stages:
   stage_1_clean:
-    epochs: 100
+    epochs: 60
+    lr: 0.0001
     tcnr_levels: [2.0, 5.0, 10.0]
     etco2_input: clean
     paradigms: [block, multi_step]
     temporal_mode: full
-    temporal_window_length: 480
     T_mode: voxelwise
+    randomize_artifacts_for_training: true
+    etco2_noise_sd_mmhg_range: [0.0, 0.0]
+    etco2_drift_sd_mmhg_range: [0.0, 0.0]
+    drift_fraction_of_noise_range: [0.0, 0.0]
+    motion_spike_probability_options: [0.0]
+    motion_spike_scale_range: [0.0, 0.0]
+    ar1_rho_range: [0.0, 0.15]
     losses:
       recon: 1.0
       residual: 0.0
-      uncertainty: 0.0
+      integral: 0.0
+      spectral: 0.0
+      supervised: 200.0
+      prior: 0.02
       smooth: 0.0
-      prior: 0.03
-      consistency: 0.0
-      tissue_order: 0.02
+      tissue_order: 0.0
 
   stage_2_physics:
-    epochs: 120
+    epochs: 100
     lr: 0.0001
     tcnr_levels: [1.0, 2.0, 5.0, 10.0]
     etco2_input: measured
     paradigms: [block, multi_step, pseudo_random_binary]
     temporal_mode: full
-    temporal_window_length: 480
     T_mode: voxelwise
+    randomize_artifacts_for_training: true
+    etco2_noise_sd_mmhg_range: [0.0, 0.2]
+    etco2_drift_sd_mmhg_range: [0.0, 0.1]
+    drift_fraction_of_noise_range: [0.0, 0.1]
+    motion_spike_probability_options: [0.0, 0.005]
+    motion_spike_scale_range: [1.0, 2.0]
+    ar1_rho_range: [0.1, 0.35]
     losses:
       recon: 1.0
       residual: 0.5
-      integral: 0.35
-      spectral: 0.10
-      uncertainty: 0.0
+      integral: 0.5
+      spectral: 0.5
+      supervised: 100.0
+      prior: 0.05
       smooth: 0.0
-      prior: 0.08
-      consistency: 0.0
-      tissue_order: 0.03
+      tissue_order: 0.01
 
   stage_3_robust:
-    epochs: 320
+    epochs: 200
     lr: 0.0001
     tcnr_levels: [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
     etco2_input: measured
-    paradigms:
-      - block
-      - multi_step
-      - pseudo_random_binary
+    paradigms: [block, multi_step, pseudo_random_binary]
     temporal_mode: full
-    temporal_window_length: 480
     T_mode: voxelwise
     losses:
       recon: 1.0
       residual: 0.5
-      integral: 0.25
-      spectral: 0.08
+      integral: 0.4
+      spectral: 0.5
       uncertainty: 0.05
+      supervised: 30.0
+      prior: 0.03
       smooth: 0.0
-      prior: 0.08
-      consistency: 0.0
-      tissue_order: 0.03
+      tissue_order: 0.01
 
   stage_4_stress:
-    enabled: true
-    epochs: 80
+    epochs: 40
     lr: 0.00005
-    tcnr_levels: [0.1, 0.2, 0.5, 1.0, 2.0]
+    tcnr_levels: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
     etco2_input: measured
-    paradigms:
-      - block
-      - multi_step
-      - pseudo_random_binary
+    paradigms: [block, multi_step, pseudo_random_binary]
     temporal_mode: full
-    temporal_window_length: 480
     T_mode: voxelwise
     losses:
       recon: 1.0
-      residual: 0.5
-      integral: 0.20
-      spectral: 0.05
+      residual: 0.4
+      integral: 0.3
+      spectral: 0.4
       uncertainty: 0.05
+      supervised: 10.0
+      prior: 0.02
       smooth: 0.0
-      prior: 0.08
-      consistency: 0.0
-      tissue_order: 0.03
+      tissue_order: 0.005
 
 checkpoint:
-  best_path: data/models/unet_pinn_fullbrain_T_recovery/best.pt
+  best_path: data/models/temporal_hybrid_3d/best.pt
   selection_metric: self_supervised_validation_loss

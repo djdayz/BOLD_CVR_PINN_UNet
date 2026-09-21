@@ -16,8 +16,8 @@ def simulate_ode_bold_torch(
     torch = __import__("torch")
     if method not in {"exact", "euler"}:
         raise ValueError("method must be 'exact' or 'euler'")
-    if cvr_map.ndim != 3:
-        raise ValueError("cvr_map must have shape B,H,W")
+    if cvr_map.ndim not in {3, 4}:
+        raise ValueError("cvr_map must have shape B,H,W or B,X,Y,Z")
     time = time_grid.to(device=cvr_map.device, dtype=cvr_map.dtype)
     delay = delay_map.to(device=cvr_map.device, dtype=cvr_map.dtype)
     tau = T_map.to(device=cvr_map.device, dtype=cvr_map.dtype).clamp_min(1e-4)

@@ -178,14 +178,10 @@ def test_one_training_epoch_saves_self_supervised_checkpoint(tmp_path):
             "num_workers": 0,
             "use_amp": False,
             "gradient_clip_norm": 1.0,
-            "use_supervised_parameter_loss": False,
         },
         "losses": {
-            "lambda_recon": 1.0,
-            "lambda_residual": 0.1,
-            "lambda_uncertainty": 0.0,
-            "lambda_smooth": 0.01,
-            "lambda_prior": 0.0,
+            "lambda_data": 1.0,
+            "lambda_view": 0.0,
         },
     }
     result = train_unet_pinn(
@@ -225,14 +221,10 @@ def test_staged_training_switches_T_mode_and_writes_history(tmp_path):
             "num_workers": 0,
             "use_amp": False,
             "gradient_clip_norm": 1.0,
-            "use_supervised_parameter_loss": False,
         },
         "losses": {
-            "lambda_recon": 1.0,
-            "lambda_residual": 0.0,
-            "lambda_uncertainty": 0.0,
-            "lambda_smooth": 0.0,
-            "lambda_prior": 0.0,
+            "lambda_data": 1.0,
+            "lambda_view": 0.0,
         },
         "stages": {
             "stage_1_clean": {
