@@ -140,6 +140,7 @@ def make_plot(args: argparse.Namespace) -> None:
         rise_idx = int(np.argmin(np.abs(time - args.transition_time)))
     t_co2 = float(time[rise_idx])
     t_bold_start = min(float(time[-1]), t_co2 + roi_delay)
+    t_bold_start_display = min(float(time[-1]), t_co2 + max(roi_delay, 20.0))
     t_bold_late = min(float(time[-1]), t_bold_start + roi_t)
 
     pre_mask = (time >= max(float(time[0]), t_co2 - 45.0)) & (time < t_co2)
@@ -203,13 +204,13 @@ def make_plot(args: argparse.Namespace) -> None:
 
     for ax in (ax_top, ax_bottom):
         ax.axvline(t_co2, color="0.25", lw=1.2, ls=":", alpha=0.75)
-        ax.axvline(t_bold_start, color="0.25", lw=1.2, ls=":", alpha=0.75)
+        ax.axvline(t_bold_start_display, color="0.25", lw=1.2, ls=":", alpha=0.75)
 
     yrange = float(np.nanmax(bold_roi) - np.nanmin(bold_roi))
     y_delay = float(np.nanpercentile(bold_roi, 10) + 0.08 * yrange)
-    ax_bottom.hlines(y_delay, t_co2, t_bold_start, color="black", linewidth=4.0)
+    ax_bottom.hlines(y_delay, t_co2, t_bold_start_display, color="black", linewidth=4.0)
     ax_bottom.text(
-        (t_co2 + t_bold_start) / 2.0,
+        (t_co2 + t_bold_start_display) / 2.0,
         y_delay - 0.28,
         "Delay, τ",
         ha="center",
@@ -223,7 +224,7 @@ def make_plot(args: argparse.Namespace) -> None:
     ax_bottom.annotate(
         "",
         xy=(t_t_visual, y_t_visual),
-        xytext=(t_bold_start, y_t_visual),
+        xytext=(t_bold_start_display, y_t_visual),
         arrowprops=dict(arrowstyle="->", lw=2.6, color="black", shrinkA=0, shrinkB=0),
     )
     ax_bottom.scatter(
@@ -234,7 +235,7 @@ def make_plot(args: argparse.Namespace) -> None:
         zorder=5,
     )
     ax_bottom.text(
-        (t_bold_start + t_t_visual) / 2.0,
+        (t_bold_start_display + t_t_visual) / 2.0,
         y_t_visual + 0.35,
         "Response time constant, T",
         ha="center",
@@ -286,7 +287,8 @@ def make_plot(args: argparse.Namespace) -> None:
         0.015,
         (
             f"cortical-GM ROI, slice {args.slice_index}, n={int(selected.sum())}; "
-            f"median CVR={roi_cvr:.3f} %/mmHg, delay={roi_delay:.1f} s, T={roi_t:.1f} s"
+            f"median CVR={roi_cvr:.3f} %/mmHg, delay={roi_delay:.1f} s, T={roi_t:.1f} s; "
+            "annotation spacing is schematic"
         ),
         ha="left",
         va="bottom",
