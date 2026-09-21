@@ -7,11 +7,10 @@ dataset:
   split_json_path: data/simulated/splits/train_val_test_split.json
   split_fractions: [0.70, 0.15, 0.15]
   split_seed_offsets: [0, 100000, 200000]
-  samples_per_epoch: 128
+  samples_per_epoch: 8
   seed: 17
   simulation_backend: torch_gpu
-  slice_mode: 3d_patch
-  patch_size: [32, 32, 24]
+  slice_mode: full_volume
   tissue_balanced_patches: false
   n_timepoints: 480
   tr_seconds: 1.55
@@ -20,9 +19,9 @@ dataset:
   etco2_input: measured
   temporal_mode: full
   transition_alpha: 1.0
-  sampling_strategy: balanced_grid
+  sampling_strategy: random
   randomize_artifacts_for_training: true
-  consistency_mode: same_paradigm
+  consistency_mode: cross_paradigm
   etco2_noise_sd_mmhg_range: [0.0, 0.40]
   etco2_drift_sd_mmhg_range: [0.0, 0.25]
   drift_fraction_of_noise_range: [0.0, 0.25]
@@ -33,7 +32,7 @@ dataset:
   model_mismatch_strength_range: [0.05, 0.20]
 
 validation:
-  samples: 63
+  samples: 21
   fixed_seeds: true
   checkpoint_metric: label_free_composite
   use_gt_parameter_metrics_for_checkpoint: false
@@ -53,7 +52,10 @@ model:
   depth: 2
   norm: instance
   dropout: 0.05
-  temporal_embedding_channels: 24
+  temporal_embedding_channels: 48
+  temporal_voxel_chunk_size: 16384
+  joint_parameter_head: true
+  full_volume_inference: true
   T_mode: voxelwise
 
 parameter_ranges:
@@ -67,9 +69,9 @@ parameter_ranges:
 losses:
   lambda_data: 1.0
   lambda_view: 0.0
-  lambda_nuisance: 0.001
-  lambda_weak: 0.05
-  transition_alpha: 1.0
+  lambda_nuisance: 0.0
+  lambda_weak: 0.0
+  transition_alpha: 0.0
   student_t_dof: 4.0
   data_scale: 1.0
   view_scale: 1.0
@@ -85,18 +87,18 @@ scheduler:
   name: none
 
 training:
-  batch_size: 32
-  gradient_accumulation_steps: 1
-  num_workers: 4
-  validation_num_workers: 2
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  num_workers: 2
+  validation_num_workers: 1
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 1
   use_amp: true
-  max_epochs: 1000
+  max_epochs: 700
   gradient_clip_norm: 1.0
   save_every_epochs: 5
-  validate_every_epochs: 1
+  validate_every_epochs: 10
   reset_optimizer_on_stage_boundary_resume: true
   resume_if_available: true
   resume_weights_only: false
@@ -106,10 +108,11 @@ stages:
   stage_1_identifiable_clean:
     epochs: 200
     lr: 0.001
-    tcnr_levels: [5.0, 10.0]
+    tcnr_levels: [2.0, 5.0, 10.0]
     etco2_input: clean
     paradigms: [block, multi_step, pseudo_random_binary]
-    consistency_mode: same_paradigm
+    consistency_mode: cross_paradigm
+    sampling_strategy: balanced_grid
     model_mismatch_probability: 0.0
     etco2_noise_sd_mmhg_range: [0.0, 0.0]
     etco2_drift_sd_mmhg_range: [0.0, 0.0]
@@ -119,43 +122,24 @@ stages:
     ar1_rho_range: [0.0, 0.15]
     losses: {data: 1.0, view: 0.0, nuisance: 0.0, weak: 0.0, transition_alpha: 0.0}
 
-  stage_2_moderate_noise:
-    epochs: 300
+  stage_2_mixed_all_conditions:
+    epochs: 500
     lr: 0.0005
-    tcnr_levels: [1.0, 2.0, 5.0, 10.0]
+    tcnr_levels: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    tcnr_probabilities: [0.05, 0.05, 0.15, 0.20, 0.20, 0.20, 0.15]
+    sampling_strategy: random
     etco2_input: measured
     paradigms: [block, multi_step, pseudo_random_binary]
-    consistency_mode: same_paradigm
-    model_mismatch_probability: 0.0
-    etco2_noise_sd_mmhg_range: [0.0, 0.20]
-    etco2_drift_sd_mmhg_range: [0.0, 0.10]
-    drift_fraction_of_noise_range: [0.0, 0.10]
-    motion_spike_probability_options: [0.0, 0.005]
-    motion_spike_scale_range: [1.0, 2.0]
-    ar1_rho_range: [0.1, 0.35]
-    losses: {data: 1.0, view: 0.25, nuisance: 0.001, weak: 0.05, transition_alpha: 1.0}
-
-  stage_3_realistic_mixed:
-    epochs: 400
-    lr: 0.0005
-    tcnr_levels: [0.5, 1.0, 2.0, 5.0, 10.0]
-    etco2_input: measured
-    paradigms: [block, multi_step, pseudo_random_binary]
-    consistency_mode: same_paradigm
-    model_mismatch_probability: 0.35
-    model_mismatch_strength_range: [0.03, 0.18]
-    losses: {data: 1.0, view: 0.35, nuisance: 0.002, weak: 0.08, transition_alpha: 1.0}
-
-  stage_4_low_tcnr:
-    epochs: 100
-    lr: 0.0001
-    tcnr_levels: [0.1, 0.2, 0.5]
-    etco2_input: measured
-    paradigms: [block, multi_step, pseudo_random_binary]
-    consistency_mode: same_paradigm
-    model_mismatch_probability: 0.35
-    model_mismatch_strength_range: [0.03, 0.18]
-    losses: {data: 1.0, view: 0.20, nuisance: 0.002, weak: 0.05, transition_alpha: 0.5}
+    consistency_mode: cross_paradigm
+    model_mismatch_probability: 0.20
+    model_mismatch_strength_range: [0.03, 0.12]
+    etco2_noise_sd_mmhg_range: [0.0, 0.40]
+    etco2_drift_sd_mmhg_range: [0.0, 0.25]
+    drift_fraction_of_noise_range: [0.0, 0.25]
+    motion_spike_probability_options: [0.0, 0.005, 0.015]
+    motion_spike_scale_range: [1.0, 3.0]
+    ar1_rho_range: [0.15, 0.55]
+    losses: {data: 1.0, view: 0.05, nuisance: 0.0, weak: 0.0, transition_alpha: 0.0}
 
 checkpoint:
   best_path: data/models/self_supervised_temporal_3d/best.pt

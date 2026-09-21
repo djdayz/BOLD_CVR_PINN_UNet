@@ -121,17 +121,32 @@ def predict_sim_parameter_maps(
             torch.cuda.synchronize(device)
         inference_start = time.perf_counter()
         with torch.no_grad():
-            prediction = sliding_window_parameter_inference(
-                model,
-                batch["features"],
-                batch["bold_psc"],
-                batch["etco2_for_model"],
-                batch["time_grid"],
-                batch["mask"],
-                batch.get("tissue_maps"),
-                patch_size=tuple(dataset_cfg.get("patch_size", (32, 32, 24))),
-                overlap=0.5,
-            )
+            if bool(run_config.get("model", {}).get("full_volume_inference", False)):
+                direct = model(
+                    batch["features"],
+                    etco2=batch["etco2_for_model"],
+                    time_grid=batch["time_grid"],
+                    mask=batch["mask"],
+                    tissue_maps=None,
+                    bold_psc=batch["bold_psc"],
+                    valid_time_mask=batch.get("valid_time_mask"),
+                )
+                prediction = {key: direct[key][0] for key in (
+                    "cvr", "delay", "T", "sigma", "sigma_cvr", "sigma_delay", "sigma_T"
+                )}
+                prediction["coverage"] = batch["mask"][0] > 0.5
+            else:
+                prediction = sliding_window_parameter_inference(
+                    model,
+                    batch["features"],
+                    batch["bold_psc"],
+                    batch["etco2_for_model"],
+                    batch["time_grid"],
+                    batch["mask"],
+                    None,
+                    patch_size=tuple(dataset_cfg.get("patch_size", (32, 32, 24))),
+                    overlap=0.5,
+                )
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         model_inference_seconds = time.perf_counter() - inference_start

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from hybrid_cvr.inference.predict_sim import _load_model, _save_float_nifti
+from hybrid_cvr.inference.predict_sim import _load_model, _merged_config, _save_float_nifti
 from hybrid_cvr.simulation.mida_bold import TISSUE_FRACTION_NAMES, tissue_boundary_uncertainty
 from hybrid_cvr.training.on_the_fly_dataset import (
     ON_THE_FLY_FEATURE_NAMES,
@@ -53,6 +53,7 @@ def infer_real_session(
     out.mkdir(parents=True, exist_ok=True)
 
     payload = torch.load(Path(checkpoint), map_location="cpu", weights_only=False)
+    run_config = _merged_config(payload.get("config") or {}, config)
     input_channels = list(payload.get("input_channel_names") or ON_THE_FLY_FEATURE_NAMES)
     if input_channels != list(ON_THE_FLY_FEATURE_NAMES):
         raise ValueError(
@@ -88,10 +89,19 @@ def infer_real_session(
     boundary = tissue_boundary_uncertainty(fractions, mask)
     tcnr = _estimate_real_tcnr(psc, etco2, mask, np)
     feature_volume = _build_real_feature_volume(
-        psc, baseline, tcnr, mask, fractions, vessel_likelihood, boundary, etco2, np
+        psc,
+        baseline,
+        tcnr,
+        mask,
+        fractions,
+        vessel_likelihood,
+        boundary,
+        etco2,
+        np,
+        tr_seconds=float(run_config.get("dataset", {}).get("tr_seconds", 1.55)),
     )
 
-    model = _load_model(payload, config, in_channels=len(input_channels))
+    model = _load_model(payload, run_config, in_channels=len(input_channels))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
@@ -105,11 +115,11 @@ def infer_real_session(
     eval_mask = np.zeros(spatial_shape, dtype=bool)
     slice_rows: list[dict[str, Any]] = []
 
-    slice_axis = _slice_axis(psc_img, str(config.get("dataset", {}).get("slice_axis", "axial")), np, nib)
+    slice_axis = _slice_axis(psc_img, str(run_config.get("dataset", {}).get("slice_axis", "axial")), np, nib)
     valid_slices = _valid_slice_indices(mask, slice_axis, np)
-    slice_range = config.get("dataset", {}).get("slice_index_range")
+    slice_range = run_config.get("dataset", {}).get("slice_index_range")
     use_training_slice_range = bool(
-        config.get("real_inference", {}).get("use_training_slice_range", False)
+        run_config.get("real_inference", {}).get("use_training_slice_range", False)
     )
     if use_training_slice_range and slice_range is not None:
         lo, hi = int(slice_range[0]), int(slice_range[1])
@@ -119,44 +129,90 @@ def infer_real_session(
         if ranged:
             valid_slices = ranged
 
+    temporal_architecture = str(run_config.get("model", {}).get("architecture", "legacy")).lower() in {
+        "temporal_3d",
+        "temporal_multidecoder",
+        "temporal_hybrid_3d",
+    }
+    if not temporal_architecture:
+        raise ValueError("Real inference with this entry point requires a temporal 3D checkpoint")
+
+    from hybrid_cvr.inference.sliding_window import sliding_window_parameter_inference
+    from hybrid_cvr.pinn.torch_ode import simulate_ode_bold_torch
+
+    features_t = torch.as_tensor(feature_volume[None], device=device, dtype=torch.float32)
+    observed_t = torch.as_tensor(
+        np.moveaxis(psc, -1, 0)[None], device=device, dtype=torch.float32
+    )
+    tissue_t = torch.as_tensor(fractions[None], device=device, dtype=torch.float32)
+    mask_t = torch.as_tensor(mask[None], device=device, dtype=torch.float32)
     time_t = torch.as_tensor(time_grid, device=device, dtype=torch.float32)
-    etco2_t = torch.as_tensor(etco2, device=device, dtype=torch.float32)
+    etco2_t = torch.as_tensor(etco2[None], device=device, dtype=torch.float32)
+    patch_size = tuple(run_config.get("dataset", {}).get("patch_size", (32, 32, 24)))
     with torch.no_grad():
-        for idx in valid_slices:
-            feat = np.take(feature_volume, idx, axis=slice_axis + 1)
-            tissue = np.take(fractions, idx, axis=slice_axis + 1)
-            sl_mask = np.take(mask, idx, axis=slice_axis)
-            if not np.any(sl_mask):
-                continue
-            features_t = torch.as_tensor(feat[None], device=device, dtype=torch.float32)
-            tissue_t = torch.as_tensor(tissue[None], device=device, dtype=torch.float32)
-            mask_t = torch.as_tensor(sl_mask[None], device=device, dtype=torch.float32)
-            pred = model(features_t, etco2=etco2_t, time_grid=time_t, mask=mask_t, tissue_maps=tissue_t)
-            cvr = pred["cvr"][0].detach().cpu().numpy().astype(np.float32)
-            delay = pred["delay"][0].detach().cpu().numpy().astype(np.float32)
-            T = pred["T"][0].detach().cpu().numpy().astype(np.float32)
-            sigma = pred["sigma"][0].detach().cpu().numpy().astype(np.float32)
-            y_hat = pred["bold_psc_hat"][0].detach().cpu().numpy().astype(np.float32)
-            observed = np.moveaxis(np.take(psc, idx, axis=slice_axis), -1, 0).astype(np.float32)
-            rms = np.sqrt(np.mean((observed - y_hat) ** 2, axis=0)).astype(np.float32)
-            _put_slice(pred_cvr, idx, slice_axis, cvr, sl_mask)
-            _put_slice(pred_delay, idx, slice_axis, delay, sl_mask)
-            _put_slice(pred_T, idx, slice_axis, T, sl_mask)
-            _put_slice(pred_sigma, idx, slice_axis, sigma, sl_mask)
-            _put_slice(recon_mean, idx, slice_axis, np.mean(y_hat, axis=0), sl_mask)
-            _put_slice(residual_rms, idx, slice_axis, rms, sl_mask)
-            _put_slice(eval_mask, idx, slice_axis, sl_mask.astype(np.float32), sl_mask)
-            slice_rows.append(
-                {
-                    "slice_index": int(idx),
-                    "brain_voxels": int(sl_mask.sum()),
-                    "cvr_median": float(np.median(cvr[sl_mask])),
-                    "delay_median": float(np.median(delay[sl_mask])),
-                    "T_median": float(np.median(T[sl_mask])),
-                    "sigma_median": float(np.median(sigma[sl_mask])),
-                    "residual_rms_median": float(np.median(rms[sl_mask])),
-                }
+        if bool(run_config.get("model", {}).get("full_volume_inference", False)):
+            direct = model(
+                features_t,
+                etco2=etco2_t,
+                time_grid=time_t,
+                mask=mask_t,
+                tissue_maps=None,
+                bold_psc=observed_t,
             )
+            prediction = {
+                key: direct[key][0]
+                for key in ("cvr", "delay", "T", "sigma")
+            }
+            prediction["coverage"] = mask_t[0] > 0.5
+        else:
+            prediction = sliding_window_parameter_inference(
+                model,
+                features_t,
+                observed_t,
+                etco2_t,
+                time_t,
+                mask_t,
+                None,
+                patch_size=patch_size,
+                overlap=0.5,
+            )
+        y_hat = simulate_ode_bold_torch(
+            prediction["cvr"].unsqueeze(0),
+            prediction["delay"].unsqueeze(0),
+            prediction["T"].unsqueeze(0),
+            etco2_t,
+            time_t,
+            mask=mask_t,
+        )[0]
+        residual = observed_t[0] - y_hat
+        recon_mean = y_hat.mean(dim=0).cpu().numpy().astype(np.float32)
+        residual_rms = residual.square().mean(dim=0).sqrt().cpu().numpy().astype(np.float32)
+
+    pred_cvr = prediction["cvr"].cpu().numpy().astype(np.float32)
+    pred_delay = prediction["delay"].cpu().numpy().astype(np.float32)
+    pred_T = prediction["T"].cpu().numpy().astype(np.float32)
+    pred_sigma = prediction["sigma"].cpu().numpy().astype(np.float32)
+    eval_mask = prediction["coverage"].cpu().numpy().astype(bool)
+    for idx in valid_slices:
+        sl_mask = np.take(eval_mask, idx, axis=slice_axis)
+        if not np.any(sl_mask):
+            continue
+        cvr = np.take(pred_cvr, idx, axis=slice_axis)
+        delay = np.take(pred_delay, idx, axis=slice_axis)
+        T = np.take(pred_T, idx, axis=slice_axis)
+        sigma = np.take(pred_sigma, idx, axis=slice_axis)
+        rms = np.take(residual_rms, idx, axis=slice_axis)
+        slice_rows.append(
+            {
+                "slice_index": int(idx),
+                "brain_voxels": int(sl_mask.sum()),
+                "cvr_median": float(np.median(cvr[sl_mask])),
+                "delay_median": float(np.median(delay[sl_mask])),
+                "T_median": float(np.median(T[sl_mask])),
+                "sigma_median": float(np.median(sigma[sl_mask])),
+                "residual_rms_median": float(np.median(rms[sl_mask])),
+            }
+        )
 
     outputs = {
         "predicted_CVR": _save_float_nifti(pred_cvr, psc_img, out / "predicted_CVR.nii.gz", nib),
@@ -181,10 +237,15 @@ def infer_real_session(
         "vessel_dir": str(vessels) if vessels is not None else None,
         "input_channel_names": input_channels,
         "slice_axis": int(slice_axis),
-        "slice_axis_name": str(config.get("dataset", {}).get("slice_axis", "axial")),
+        "slice_axis_name": str(run_config.get("dataset", {}).get("slice_axis", "axial")),
         "slice_index_range": list(slice_range) if slice_range is not None else None,
         "used_training_slice_range": use_training_slice_range,
         "processed_slices": len(slice_rows),
+        "inference_geometry": (
+            "full_volume" if bool(run_config.get("model", {}).get("full_volume_inference", False))
+            else "overlapping_3d_sliding_window"
+        ),
+        "patch_size": list(patch_size),
         "source_bold_psc": str(processed / "bold_psc.nii.gz"),
         "source_motion_corrected_bold": str(processed / "bold_mcflirt.nii.gz"),
     }
@@ -308,6 +369,8 @@ def _build_real_feature_volume(
     boundary_uncertainty: Any,
     etco2: Any,
     np: Any,
+    *,
+    tr_seconds: float = 1.55,
 ) -> Any:
     baseline_n = max(4, psc.shape[3] // 5)
     positive = etco2 > max(1.0, 0.25 * float(np.nanmax(etco2)))
@@ -334,7 +397,7 @@ def _build_real_feature_volume(
             psc,
             etco2,
             mask,
-            tr_seconds=float(config.get("dataset", {}).get("tr_seconds", 1.55)),
+            tr_seconds=float(tr_seconds),
             time_axis=3,
             np=np,
         )

@@ -167,6 +167,12 @@ def train_unet_pinn(
                 train=True,
                 gradient_accumulation_steps=grad_accum_steps,
             )
+            validate_every = max(1, int(training_cfg.get("validate_every_epochs", 1)))
+            should_validate = bool(validate) and (
+                stage_epoch == 1
+                or stage_epoch == stage_epochs
+                or stage_epoch % validate_every == 0
+            )
             val_metrics = (
                 _run_epoch(
                     model,
@@ -180,11 +186,11 @@ def train_unet_pinn(
                     train=False,
                     gradient_accumulation_steps=1,
                 )
-                if validate
-                else train_metrics
+                if should_validate
+                else {key: float("nan") for key in train_metrics}
             )
             val_total = float(val_metrics["total"])
-            if scheduler is not None:
+            if scheduler is not None and should_validate:
                 scheduler.step(val_total)
             lr = float(optimizer.param_groups[0]["lr"])
             row = {
@@ -218,7 +224,7 @@ def train_unet_pinn(
                 stage_name,
                 case_split_metadata,
             )
-            if val_total < best_loss:
+            if should_validate and val_total < best_loss:
                 best_loss = val_total
                 _save_training_checkpoint(
                     best_path,
@@ -235,7 +241,7 @@ def train_unet_pinn(
                     case_split_metadata,
                 )
             stage_best = stage_best_losses.get(stage_name, float("inf"))
-            if val_total < stage_best:
+            if should_validate and val_total < stage_best:
                 stage_best_losses[stage_name] = val_total
                 _save_training_checkpoint(
                     out / _stage_checkpoint_name(stage_name),
@@ -332,7 +338,7 @@ def _run_epoch(
                     etco2=batch["etco2_for_model"],
                     time_grid=time_grid,
                     mask=batch["mask"],
-                    tissue_maps=batch.get("tissue_maps"),
+                    tissue_maps=None,
                     bold_psc=batch["bold_psc"],
                     valid_time_mask=batch.get("valid_time_mask"),
                 )
@@ -343,7 +349,7 @@ def _run_epoch(
                         etco2=batch["consistency_etco2_for_model"],
                         time_grid=time_grid,
                         mask=batch["mask"],
-                        tissue_maps=batch.get("tissue_maps"),
+                        tissue_maps=None,
                         bold_psc=batch["consistency_bold_psc"],
                         valid_time_mask=batch.get("valid_time_mask"),
                     )
@@ -858,11 +864,16 @@ def _make_dataset(
             "model_mismatch_probability",
             "model_mismatch_strength_range",
             "consistency_mode",
+            "sampling_strategy",
+            "tcnr_probabilities",
         ):
             if key in stage_cfg:
                 dataset_cfg[key] = stage_cfg[key]
     dataset_cfg["sim_root"] = Path(sim_root)
     dataset_cfg["split"] = split
+    if split in {"val", "validation"}:
+        dataset_cfg["sampling_strategy"] = "balanced_grid"
+        dataset_cfg["tcnr_probabilities"] = None
     if samples_per_epoch is not None:
         dataset_cfg["samples_per_epoch"] = int(samples_per_epoch)
     stage_loss_cfg = _stage_loss_config(config.get("losses", {}), stage_cfg.get("losses") if stage_cfg else None)
@@ -914,8 +925,10 @@ def _build_model(config: dict[str, Any], in_channels: int):
             norm=str(model_cfg.get("norm", "instance")),
             dropout=float(model_cfg.get("dropout", 0.05)),
             temporal_embedding_channels=int(model_cfg.get("temporal_embedding_channels", 32)),
+            temporal_voxel_chunk_size=int(model_cfg.get("temporal_voxel_chunk_size", 16384)),
             parameter_ranges=ranges,
             parameterization=str(model_cfg.get("parameterization", "direct")),
+            joint_parameter_head=bool(model_cfg.get("joint_parameter_head", False)),
             g_min=float(model_cfg.get("g_min", 1e-5)),
             g_max=float(model_cfg.get("g_max", 0.9)),
             k_min=float(model_cfg.get("k_min", 0.01)),

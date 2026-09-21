@@ -41,7 +41,7 @@ class VoxelwiseTemporalTCN(__import__("torch").nn.Module):
         self.readout = nn.Sequential(nn.Conv1d(channels, channels, 1), nn.SiLU(inplace=True),
                                      nn.AdaptiveAvgPool1d(1))
 
-    def forward(self, bold, etco2, time_grid, valid_time_mask=None):
+    def forward(self, bold, etco2, time_grid, valid_time_mask=None, spatial_mask=None):
         torch = __import__("torch")
         if bold.ndim != 5:
             raise ValueError("Expected BOLD PSC with shape B,T,X,Y,Z")
@@ -57,14 +57,23 @@ class VoxelwiseTemporalTCN(__import__("torch").nn.Module):
         if valid_time_mask is not None:
             valid = valid_time_mask.to(device=bold.device, dtype=bold.dtype)[:, :n_time]
         signal = bold.movedim(1, -1).reshape(batch, -1, n_time)
-        signal = (signal - signal.mean(-1, keepdim=True)) / signal.std(-1, keepdim=True).clamp_min(0.05)
         voxels = signal.shape[1]
+        if spatial_mask is None:
+            active = torch.ones(batch * voxels, device=bold.device, dtype=torch.bool)
+        else:
+            active = spatial_mask.reshape(batch, voxels).to(device=bold.device) > 0.5
+            active = active.reshape(-1)
+        sample_index = torch.arange(batch, device=bold.device).repeat_interleave(voxels)[active]
+        signal = signal.reshape(batch * voxels, n_time)[active]
+        signal = (signal - signal.mean(-1, keepdim=True)) / signal.std(-1, keepdim=True).clamp_min(0.05)
+        active_voxels = signal.shape[0]
         x = torch.stack([
-            signal, u[:, None].expand(batch, voxels, n_time),
-            du[:, None].expand(batch, voxels, n_time),
-            t.view(1, 1, -1).expand(batch, voxels, n_time),
-            valid[:, None].expand(batch, voxels, n_time),
-        ], dim=2).reshape(-1, 5, n_time)
+            signal,
+            u[sample_index],
+            du[sample_index],
+            t.view(1, -1).expand(active_voxels, n_time),
+            valid[sample_index],
+        ], dim=1)
         def encode(chunk):
             return self.readout(self.blocks(self.input(chunk))).squeeze(-1)
 
@@ -77,8 +86,12 @@ class VoxelwiseTemporalTCN(__import__("torch").nn.Module):
             else:
                 encoded = encode(chunk)
             embeddings.append(encoded)
-        x = torch.cat(embeddings, dim=0)
-        return x.reshape(batch, *spatial, self.channels).movedim(-1, 1).contiguous()
+        encoded = torch.cat(embeddings, dim=0)
+        full = torch.zeros(
+            (batch * voxels, self.channels), device=bold.device, dtype=encoded.dtype
+        )
+        full[active] = encoded
+        return full.reshape(batch, *spatial, self.channels).movedim(-1, 1).contiguous()
 
 
 class SpatialHead(__import__("torch").nn.Module):
@@ -94,6 +107,28 @@ class SpatialHead(__import__("torch").nn.Module):
         return self.net(x).squeeze(1)
 
 
+class JointPhysiologyHead(__import__("torch").nn.Module):
+    """Predict all physiological parameters and uncertainties from one latent field."""
+
+    def __init__(self, in_channels: int, hidden: int, norm: str):
+        super().__init__()
+        nn = __import__("torch").nn
+        normalise = (
+            nn.InstanceNorm3d(hidden, affine=True)
+            if norm == "instance"
+            else nn.GroupNorm(_groups(hidden), hidden)
+        )
+        self.net = nn.Sequential(
+            nn.Conv3d(in_channels, hidden, 3, padding=1),
+            normalise,
+            nn.SiLU(inplace=True),
+            nn.Conv3d(hidden, 7, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class TemporalHybridUNetPINN(__import__("torch").nn.Module):
     """Full-time TCN + 3D U-Net + separate coarse and full-resolution heads."""
 
@@ -101,13 +136,18 @@ class TemporalHybridUNetPINN(__import__("torch").nn.Module):
                  norm: str = "instance", dropout: float = 0.05,
                  temporal_embedding_channels: int = 24,
                  parameter_ranges: ParameterRanges | None = None,
-                 parameterization: str = "direct", **_: object):
+                 parameterization: str = "direct", joint_parameter_head: bool = False,
+                 temporal_voxel_chunk_size: int = 16384,
+                 **_: object):
         super().__init__()
         if parameterization != "direct":
             raise ValueError("Principal model requires direct bounded parameter heads")
         self.parameter_ranges = parameter_ranges or ParameterRanges()
         self.parameterization, self.T_mode = parameterization, "voxelwise"
-        self.temporal_encoder = VoxelwiseTemporalTCN(temporal_embedding_channels)
+        self.joint_parameter_head = bool(joint_parameter_head)
+        self.temporal_encoder = VoxelwiseTemporalTCN(
+            temporal_embedding_channels, voxel_chunk_size=temporal_voxel_chunk_size
+        )
         self.spatial_channels = int(base_channels)
         self.spatial_unet = UNet3D(
             in_channels=in_channels + temporal_embedding_channels, out_channels=base_channels,
@@ -124,30 +164,46 @@ class TemporalHybridUNetPINN(__import__("torch").nn.Module):
             p: SpatialHead(base_channels, max(8, base_channels // 2), norm) for p in ("cvr", "delay", "T")
         })
         self.observation_uncertainty_head = SpatialHead(base_channels, max(8, base_channels // 2), norm)
+        self.joint_head = JointPhysiologyHead(base_channels, base_channels, norm)
 
     def forward(self, features, etco2=None, time_grid=None, mask=None, tissue_maps=None,
                 bold_psc=None, valid_time_mask=None):
         torch = __import__("torch")
         if bold_psc is None or etco2 is None or time_grid is None:
             raise ValueError("bold_psc, measured etco2 and time_grid are required")
-        temporal = self.temporal_encoder(bold_psc, etco2, time_grid, valid_time_mask)
+        temporal = self.temporal_encoder(
+            bold_psc, etco2, time_grid, valid_time_mask, spatial_mask=mask
+        )
         shared = self.spatial_unet(torch.cat([features, temporal], dim=1))
         limits = {"cvr": (self.parameter_ranges.cvr_min, self.parameter_ranges.cvr_max),
                   "delay": (self.parameter_ranges.delay_min, self.parameter_ranges.delay_max),
                   "T": (self.parameter_ranges.T_min, self.parameter_ranges.T_max)}
         raw, coarse, values = {}, {}, {}
-        for name in ("cvr", "delay", "T"):
-            coarse_raw = self.coarse_heads[name](shared)
-            refine = self.refine_heads[name](torch.cat([shared, temporal, coarse_raw[:, None]], 1))
-            raw[name] = coarse_raw + 0.75 * torch.tanh(refine)
-            lo, hi = limits[name]
-            coarse[name] = lo + (hi - lo) * torch.sigmoid(coarse_raw)
-            values[name] = lo + (hi - lo) * torch.sigmoid(raw[name])
+        if self.joint_parameter_head:
+            joint = self.joint_head(shared)
+            for index, name in enumerate(("cvr", "delay", "T")):
+                raw[name] = joint[:, index]
+                lo, hi = limits[name]
+                values[name] = lo + (hi - lo) * torch.sigmoid(raw[name])
+                coarse[name] = values[name]
+            log_vars = {
+                name: joint[:, index + 3].clamp(-8, 8)
+                for index, name in enumerate(("cvr", "delay", "T"))
+            }
+            log_scale = joint[:, 6].clamp(-5, 3)
+        else:
+            for name in ("cvr", "delay", "T"):
+                coarse_raw = self.coarse_heads[name](shared)
+                refine = self.refine_heads[name](torch.cat([shared, temporal, coarse_raw[:, None]], 1))
+                raw[name] = coarse_raw + 0.75 * torch.tanh(refine)
+                lo, hi = limits[name]
+                coarse[name] = lo + (hi - lo) * torch.sigmoid(coarse_raw)
+                values[name] = lo + (hi - lo) * torch.sigmoid(raw[name])
+            log_vars = {p: self.uncertainty_heads[p](shared).clamp(-8, 8) for p in values}
+            log_scale = self.observation_uncertainty_head(shared).clamp(-5, 3)
         physiology = simulate_ode_bold_torch(values["cvr"], values["delay"], values["T"],
                                               etco2, time_grid, mask=mask, method="exact")
         reconstruction, nuisance = self._profile_nuisance(physiology, bold_psc, time_grid, mask)
-        log_vars = {p: self.uncertainty_heads[p](shared).clamp(-8, 8) for p in values}
-        log_scale = self.observation_uncertainty_head(shared).clamp(-5, 3)
         parameter_sigma = {p: torch.exp(0.5 * log_vars[p]) for p in values}
         combined_sigma = (
             parameter_sigma["cvr"] / 1.8

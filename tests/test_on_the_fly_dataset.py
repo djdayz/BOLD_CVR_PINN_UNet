@@ -118,6 +118,26 @@ def test_balanced_grid_covers_each_paradigm_and_tcnr(tmp_path):
     assert seen == {(paradigm, tcnr) for paradigm in paradigms for tcnr in tcnr_levels}
 
 
+def test_weighted_tcnr_sampling_reduces_very_low_tcnr_frequency(tmp_path):
+    case_dir = tmp_path / "sim" / "mida_parameters" / "case_000"
+    _write_parameter_case(case_dir)
+    dataset = OnTheFlyCVRDataset(
+        OnTheFlyDatasetConfig(
+            sim_root=tmp_path / "sim",
+            samples_per_epoch=1000,
+            n_timepoints=8,
+            temporal_window_length=8,
+            paradigms=("block",),
+            tcnr_levels=(0.1, 0.2, 1.0, 2.0),
+            tcnr_probabilities=(0.05, 0.05, 0.45, 0.45),
+            sampling_strategy="random",
+        )
+    )
+    values = [dataset._choose_condition(i, np.random.default_rng(i))[1] for i in range(1000)]
+    very_low = sum(value in {0.1, 0.2} for value in values)
+    assert 50 <= very_low <= 160
+
+
 def test_training_artifact_sampling_changes_by_epoch_but_validation_is_fixed(tmp_path):
     case_dir = tmp_path / "sim" / "mida_parameters" / "case_000"
     _write_parameter_case(case_dir)

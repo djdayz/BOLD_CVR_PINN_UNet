@@ -119,16 +119,21 @@ def self_supervised_loss(pred: dict, batch: dict, weights: LossWeights | None = 
     assert_no_supervised_parameter_loss(batch)
     mask = batch.get("mask")
     temporal_weights = transition_weights(batch, weights.transition_alpha)
+    zero = pred["cvr"].new_zeros(())
     losses = {
         "data": student_t_reconstruction_loss(
             pred["bold_psc_hat"], batch["bold_psc"], pred["sigma_y"], mask,
             temporal_weights, weights.student_t_dof,
         ),
-        "nuisance": nuisance_loss(pred, mask),
-        "residual_structure": residual_structure_loss(
-            pred["bold_psc_hat"], batch["bold_psc"], batch["etco2_for_model"], mask
+        "nuisance": nuisance_loss(pred, mask) if weights.lambda_nuisance > 0 else zero,
+        "residual_structure": (
+            residual_structure_loss(
+                pred["bold_psc_hat"], batch["bold_psc"], batch["etco2_for_model"], mask
+            )
+            if weights.lambda_weak > 0
+            else zero
         ),
-        "saturation": saturation_loss(pred, mask),
+        "saturation": saturation_loss(pred, mask) if weights.lambda_weak > 0 else zero,
     }
     losses["weak"] = losses["residual_structure"] + losses["saturation"]
     losses["total"] = (
