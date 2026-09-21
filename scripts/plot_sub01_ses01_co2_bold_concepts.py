@@ -218,11 +218,20 @@ def make_plot(args: argparse.Namespace) -> None:
     )
 
     arrowprops = dict(arrowstyle="<->", lw=2.8, color="black", shrinkA=0, shrinkB=0)
+    y_t_bracket = max(y_start, y_late) + 0.60
+    ax_bottom.vlines(
+        [t_bold_start, t_bold_late],
+        [y_start, y_late],
+        [y_t_bracket, y_t_bracket],
+        color="black",
+        linewidth=1.3,
+        linestyles=":",
+    )
     ax_bottom.annotate(
         "",
-        xy=(t_bold_late, y_late),
-        xytext=(t_bold_start, y_start),
-        arrowprops=dict(arrowstyle="->", lw=2.6, color="black", shrinkA=0, shrinkB=0),
+        xy=(t_bold_late, y_t_bracket),
+        xytext=(t_bold_start, y_t_bracket),
+        arrowprops=dict(arrowstyle="<->", lw=2.6, color="black", shrinkA=0, shrinkB=0),
     )
     ax_bottom.scatter(
         [t_bold_start, t_bold_late],
@@ -233,8 +242,8 @@ def make_plot(args: argparse.Namespace) -> None:
     )
     ax_bottom.text(
         (t_bold_start + t_bold_late) / 2.0,
-        (y_start + y_late) / 2.0 + 0.55,
-        "Response time, T",
+        y_t_bracket + 0.35,
+        "Response time constant, T",
         ha="center",
         va="bottom",
         fontweight="bold",
@@ -249,7 +258,24 @@ def make_plot(args: argparse.Namespace) -> None:
     ax_bottom.text(
         t_amp + 8.0,
         (y_arrow_low + y_arrow_high) / 2.0,
-        "CVR magnitude",
+        "CVR = ΔBOLD / ΔETCO2",
+        ha="left",
+        va="center",
+        fontweight="bold",
+    )
+
+    etco2_at_amp = float(np.interp(t_amp, time, etco2))
+    baseline_at_amp = float(np.interp(t_amp, time, baseline))
+    ax_top.annotate(
+        "",
+        xy=(t_amp, etco2_at_amp),
+        xytext=(t_amp, baseline_at_amp),
+        arrowprops=dict(arrowstyle="<->", lw=2.2, color="black", shrinkA=0, shrinkB=0),
+    )
+    ax_top.text(
+        t_amp + 8.0,
+        (etco2_at_amp + baseline_at_amp) / 2.0,
+        "ΔETCO2",
         ha="left",
         va="center",
         fontweight="bold",
