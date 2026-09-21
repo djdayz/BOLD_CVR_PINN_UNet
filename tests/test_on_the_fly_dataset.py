@@ -11,7 +11,7 @@ from hybrid_cvr.training.on_the_fly_dataset import (
     OnTheFlyDatasetConfig,
     assert_feature_names_are_observable,
 )
-from hybrid_cvr.training.train import train_unet_pinn, validate_training_config
+from hybrid_cvr.training.train import train_physiology_model, validate_training_config
 
 
 def _write_img(path: Path, data):
@@ -204,7 +204,7 @@ def test_one_training_epoch_saves_self_supervised_checkpoint(tmp_path):
             "lambda_view": 0.0,
         },
     }
-    result = train_unet_pinn(
+    result = train_physiology_model(
         cfg,
         tmp_path / "sim",
         tmp_path / "model",
@@ -263,7 +263,7 @@ def test_staged_training_switches_T_mode_and_writes_history(tmp_path):
             },
         },
     }
-    result = train_unet_pinn(cfg, tmp_path / "sim", tmp_path / "model", samples_per_epoch=1)
+    result = train_physiology_model(cfg, tmp_path / "sim", tmp_path / "model", samples_per_epoch=1)
     history = result["history"].read_text(encoding="utf-8")
     assert "stage_1_clean" in history
     assert "stage_2_physics" in history

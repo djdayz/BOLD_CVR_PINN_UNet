@@ -2,7 +2,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from hybrid_cvr.pinn.losses import (
+from hybrid_cvr.physiology.losses import (
     LossWeights,
     assert_no_supervised_parameter_loss,
     self_supervised_loss,

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from hybrid_cvr.models.constraints import ParameterRanges
 from hybrid_cvr.models.unet3d import UNet3D
-from hybrid_cvr.pinn.torch_ode import simulate_ode_bold_torch
+from hybrid_cvr.physiology.torch_ode import simulate_ode_bold_torch
+
+
+def _logit(probability: float) -> float:
+    import math
+
+    probability = min(max(float(probability), 1e-6), 1.0 - 1e-6)
+    return math.log(probability / (1.0 - probability))
 
 
 def _groups(channels: int) -> int:
@@ -25,8 +32,8 @@ class TemporalBlock(__import__("torch").nn.Module):
         return self.act(x + self.net(x))
 
 
-class VoxelwiseTemporalTCN(__import__("torch").nn.Module):
-    """Dilated shared TCN using complete BOLD and explicit stimulus histories."""
+class VoxelwiseCNN1D(__import__("torch").nn.Module):
+    """Shared non-causal 1D CNN using complete BOLD and stimulus histories."""
 
     def __init__(self, channels: int = 24, voxel_chunk_size: int = 2048):
         super().__init__()
@@ -37,7 +44,9 @@ class VoxelwiseTemporalTCN(__import__("torch").nn.Module):
             nn.Conv1d(5, channels, 5, padding=2),
             nn.GroupNorm(_groups(channels), channels), nn.SiLU(inplace=True),
         )
-        self.blocks = nn.Sequential(*[TemporalBlock(channels, d) for d in (1, 2, 4, 8)])
+        # At TR=1.55 s this spans roughly +/-195 s, covering the configured
+        # 80 s delay range and slow first-order responses.
+        self.blocks = nn.Sequential(*[TemporalBlock(channels, d) for d in (1, 2, 4, 8, 16, 32)])
         self.readout = nn.Sequential(nn.Conv1d(channels, channels, 1), nn.SiLU(inplace=True),
                                      nn.AdaptiveAvgPool1d(1))
 
@@ -46,9 +55,9 @@ class VoxelwiseTemporalTCN(__import__("torch").nn.Module):
         if bold.ndim != 5:
             raise ValueError("Expected BOLD PSC with shape B,T,X,Y,Z")
         batch, n_time, *spatial = bold.shape
-        u = etco2 if etco2.ndim == 2 else etco2.unsqueeze(0)
-        u = u.to(device=bold.device, dtype=bold.dtype)[:, :n_time]
-        u = (u - u.mean(1, keepdim=True)) / u.std(1, keepdim=True).clamp_min(1e-4)
+        raw_u = etco2 if etco2.ndim == 2 else etco2.unsqueeze(0)
+        raw_u = raw_u.to(device=bold.device, dtype=bold.dtype)[:, :n_time]
+        u = (raw_u - raw_u.mean(1, keepdim=True)) / raw_u.std(1, keepdim=True).clamp_min(1e-4)
         du = torch.zeros_like(u)
         du[:, 1:] = u[:, 1:] - u[:, :-1]
         t = time_grid.to(device=bold.device, dtype=bold.dtype)
@@ -122,15 +131,15 @@ class JointPhysiologyHead(__import__("torch").nn.Module):
             nn.Conv3d(in_channels, hidden, 3, padding=1),
             normalise,
             nn.SiLU(inplace=True),
-            nn.Conv3d(hidden, 7, 1),
+            nn.Conv3d(hidden, 6, 1),
         )
 
     def forward(self, x):
         return self.net(x)
 
 
-class TemporalHybridUNetPINN(__import__("torch").nn.Module):
-    """Full-time TCN + 3D U-Net + separate coarse and full-resolution heads."""
+class CNN1DUNet3DPhysiologyModel(__import__("torch").nn.Module):
+    """Full-time 1D CNN + 3D U-Net with differentiable profiled CVR."""
 
     def __init__(self, in_channels: int, base_channels: int = 24, depth: int = 2,
                  norm: str = "instance", dropout: float = 0.05,
@@ -138,6 +147,7 @@ class TemporalHybridUNetPINN(__import__("torch").nn.Module):
                  parameter_ranges: ParameterRanges | None = None,
                  parameterization: str = "direct", joint_parameter_head: bool = False,
                  temporal_voxel_chunk_size: int = 16384,
+                 initial_parameter_values: dict[str, float] | None = None,
                  **_: object):
         super().__init__()
         if parameterization != "direct":
@@ -145,7 +155,7 @@ class TemporalHybridUNetPINN(__import__("torch").nn.Module):
         self.parameter_ranges = parameter_ranges or ParameterRanges()
         self.parameterization, self.T_mode = parameterization, "voxelwise"
         self.joint_parameter_head = bool(joint_parameter_head)
-        self.temporal_encoder = VoxelwiseTemporalTCN(
+        self.temporal_encoder = VoxelwiseCNN1D(
             temporal_embedding_channels, voxel_chunk_size=temporal_voxel_chunk_size
         )
         self.spatial_channels = int(base_channels)
@@ -165,6 +175,23 @@ class TemporalHybridUNetPINN(__import__("torch").nn.Module):
         })
         self.observation_uncertainty_head = SpatialHead(base_channels, max(8, base_channels // 2), norm)
         self.joint_head = JointPhysiologyHead(base_channels, base_channels, norm)
+        self._initialize_joint_head(initial_parameter_values or {})
+
+    def _initialize_joint_head(self, initial_values: dict[str, float]) -> None:
+        """Start direct heads at broad physiological values, not range midpoints."""
+        torch = __import__("torch")
+        defaults = {"delay": 25.0, "T": 25.0}
+        limits = {
+            "delay": (self.parameter_ranges.delay_min, self.parameter_ranges.delay_max),
+            "T": (self.parameter_ranges.T_min, self.parameter_ranges.T_max),
+        }
+        final = self.joint_head.net[-1]
+        with torch.no_grad():
+            final.weight[:2].normal_(mean=0.0, std=1e-3)
+            for index, name in enumerate(("delay", "T")):
+                lo, hi = limits[name]
+                value = min(max(float(initial_values.get(name, defaults[name])), lo), hi)
+                final.bias[index] = _logit((value - lo) / max(hi - lo, 1e-8))
 
     def forward(self, features, etco2=None, time_grid=None, mask=None, tissue_maps=None,
                 bold_psc=None, valid_time_mask=None):
@@ -175,34 +202,43 @@ class TemporalHybridUNetPINN(__import__("torch").nn.Module):
             bold_psc, etco2, time_grid, valid_time_mask, spatial_mask=mask
         )
         shared = self.spatial_unet(torch.cat([features, temporal], dim=1))
-        limits = {"cvr": (self.parameter_ranges.cvr_min, self.parameter_ranges.cvr_max),
-                  "delay": (self.parameter_ranges.delay_min, self.parameter_ranges.delay_max),
+        limits = {"delay": (self.parameter_ranges.delay_min, self.parameter_ranges.delay_max),
                   "T": (self.parameter_ranges.T_min, self.parameter_ranges.T_max)}
         raw, coarse, values = {}, {}, {}
         if self.joint_parameter_head:
             joint = self.joint_head(shared)
-            for index, name in enumerate(("cvr", "delay", "T")):
+            for index, name in enumerate(("delay", "T")):
                 raw[name] = joint[:, index]
                 lo, hi = limits[name]
                 values[name] = lo + (hi - lo) * torch.sigmoid(raw[name])
                 coarse[name] = values[name]
             log_vars = {
-                name: joint[:, index + 3].clamp(-8, 8)
+                name: joint[:, index + 2].clamp(-8, 8)
                 for index, name in enumerate(("cvr", "delay", "T"))
             }
-            log_scale = joint[:, 6].clamp(-5, 3)
+            log_scale = joint[:, 5].clamp(-5, 3)
         else:
-            for name in ("cvr", "delay", "T"):
+            for name in ("delay", "T"):
                 coarse_raw = self.coarse_heads[name](shared)
                 refine = self.refine_heads[name](torch.cat([shared, temporal, coarse_raw[:, None]], 1))
                 raw[name] = coarse_raw + 0.75 * torch.tanh(refine)
                 lo, hi = limits[name]
                 coarse[name] = lo + (hi - lo) * torch.sigmoid(coarse_raw)
                 values[name] = lo + (hi - lo) * torch.sigmoid(raw[name])
-            log_vars = {p: self.uncertainty_heads[p](shared).clamp(-8, 8) for p in values}
+            log_vars = {
+                p: self.uncertainty_heads[p](shared).clamp(-8, 8)
+                for p in ("cvr", "delay", "T")
+            }
             log_scale = self.observation_uncertainty_head(shared).clamp(-5, 3)
-        physiology = simulate_ode_bold_torch(values["cvr"], values["delay"], values["T"],
-                                              etco2, time_grid, mask=mask, method="exact")
+        unit_response = simulate_ode_bold_torch(
+            torch.ones_like(values["delay"]), values["delay"], values["T"],
+            etco2, time_grid, mask=mask, method="exact",
+        )
+        values["cvr"] = self._profile_cvr(
+            unit_response, bold_psc, time_grid, valid_time_mask, mask
+        )
+        coarse["cvr"] = values["cvr"]
+        physiology = unit_response * values["cvr"].unsqueeze(1)
         reconstruction, nuisance = self._profile_nuisance(physiology, bold_psc, time_grid, mask)
         parameter_sigma = {p: torch.exp(0.5 * log_vars[p]) for p in values}
         combined_sigma = (
@@ -219,6 +255,39 @@ class TemporalHybridUNetPINN(__import__("torch").nn.Module):
             "sigma": combined_sigma,
             **{f"sigma_{p}": parameter_sigma[p] for p in values},
         }
+
+    def _profile_cvr(self, unit_response, observed, time_grid, valid_time_mask, mask):
+        """Estimate CVR amplitude by differentiable least squares in physical units."""
+        torch = __import__("torch")
+        batch, n_time = observed.shape[:2]
+        time = time_grid.to(device=observed.device, dtype=observed.dtype)[:n_time]
+        time = time.view(1, n_time).expand(batch, -1)
+        valid = torch.ones_like(time)
+        if valid_time_mask is not None:
+            valid = valid_time_mask.to(device=observed.device, dtype=observed.dtype)[:, :n_time]
+        weight_shape = (batch, n_time) + (1,) * (observed.ndim - 2)
+        weight = valid.view(weight_shape)
+        denominator = weight.sum(dim=1).clamp_min(1.0)
+        time_mean = (valid * time).sum(1) / valid.sum(1).clamp_min(1.0)
+        centered_time = time - time_mean[:, None]
+        time_view = centered_time.view(weight_shape)
+        time_energy = (weight * time_view.square()).sum(1).clamp_min(1e-6)
+
+        def remove_intercept_and_drift(values):
+            mean = (weight * values).sum(1) / denominator
+            centered = values - mean.unsqueeze(1)
+            slope = (weight * centered * time_view).sum(1) / time_energy
+            return centered - slope.unsqueeze(1) * time_view
+
+        x = remove_intercept_and_drift(unit_response)
+        y = remove_intercept_and_drift(observed)
+        numerator = (weight * x * y).sum(1)
+        energy = (weight * x.square()).sum(1).clamp_min(1e-6)
+        cvr = numerator / energy
+        cvr = cvr.clamp(self.parameter_ranges.cvr_min, self.parameter_ranges.cvr_max)
+        if mask is not None:
+            cvr = cvr * mask.to(device=cvr.device, dtype=cvr.dtype)
+        return cvr
 
     @staticmethod
     def _profile_nuisance(physiology, observed, time_grid, mask):

@@ -3,7 +3,7 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from hybrid_cvr.cvr.ode import solve_ode_response_numpy
-from hybrid_cvr.pinn.torch_ode import simulate_ode_bold_torch
+from hybrid_cvr.physiology.torch_ode import simulate_ode_bold_torch
 
 
 def test_zero_cvr_gives_near_zero_response():

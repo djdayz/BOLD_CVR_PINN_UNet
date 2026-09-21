@@ -1,7 +1,7 @@
-# Hybrid CVR U-Net/PINN
+# Self-Supervised CVR Physiology Model
 
 Research code for unsupervised/self-supervised BOLD-MRI cerebrovascular
-reactivity (CVR) mapping with a hybrid U-Net/PINN and a differentiable
+reactivity (CVR) mapping with a self-supervised 1D-CNN + 3D-U-Net physiology model and a differentiable
 first-order ODE forward model.
 
 The project estimates voxelwise:
@@ -30,10 +30,12 @@ where:
 - `tau_v` is the delay
 - `T_v` is the response time constant
 
-The temporal 3D network predicts parameter maps. The differentiable ODE solver
-uses those maps and the ETCO2 trace to reconstruct BOLD PSC. Training is strictly
-self-supervised and uses robust Student-t reconstruction likelihood, paired-view
-consistency, nuisance regularization, and weak label-free physiological constraints.
+The non-causal 1D CNN and 3D U-Net predict voxelwise delay and `T`. Given those
+timing maps, CVR is profiled differentiably from raw BOLD PSC and delta-ETCO2
+amplitudes after removing intercept and linear drift. The differentiable ODE
+solver then reconstructs BOLD PSC. Training is strictly self-supervised and uses
+robust Student-t reconstruction likelihood, paired-view consistency, nuisance
+regularization, and weak label-free physiological constraints.
 There is no supervised GT parameter loss, tissue-distribution target, or spatial
 smoothness loss.
 
@@ -49,7 +51,7 @@ configs/
   segmentation.yaml
   real_cvr_fit.yaml
   simulation.yaml
-  train_temporal_hybrid_3d_v2_refine.yaml
+  train_cnn1d_unet3d_physiology.yaml
 
 src/hybrid_cvr/
   preprocessing/      BOLD motion correction, PSC conversion, gas processing
@@ -57,8 +59,8 @@ src/hybrid_cvr/
   cvr/                GLM and exponential-HRF/ODE real-data CVR fitting
   distributions/      Tissue-specific pooled parameter distributions
   simulation/         MIDA tissue maps and synthetic 4D BOLD generation
-  models/             U-Net/PINN model definitions
-  pinn/               ODE, delay interpolation, losses, uncertainty
+  models/             physiology-model definitions
+  physiology/        ODE, delay interpolation, losses, uncertainty
   training/           On-the-fly mixed simulation training
   inference/          Synthetic and real-subject prediction export
   visualisation/      QC plots and map summaries
@@ -128,7 +130,7 @@ gas trace. The project has also used the external dataset at:
    pooled distributions to create partial-volume-aware GT parameter-map cases.
 10. Generate synthetic 4D BOLD from GT `CVR`, `delay`, `T`, ETCO2 paradigms, and
     tCNR-dependent noise using the ODE forward model.
-11. Train the hybrid U-Net/PINN on-the-fly with mixed cases, slices, ETCO2
+11. Train the self-supervised 1D-CNN + 3D-U-Net physiology model on-the-fly with mixed cases, slices, ETCO2
     paradigms, tCNR levels, seeds, drift, motion spikes, and ETCO2 noise.
 12. Export predicted maps for held-out synthetic validation/test conditions and
     run inference on real MCFLIRT-processed BOLD images.
@@ -199,7 +201,7 @@ hybrid-cvr generate-mida-parameter-maps \
   --config configs/simulation.yaml
 
 hybrid-cvr prepare-case-index \
-  --config configs/train_temporal_hybrid_3d_v2_refine.yaml
+  --config configs/train_cnn1d_unet3d_physiology.yaml
 ```
 
 Generate synthetic BOLD QC examples:
@@ -214,7 +216,7 @@ Train the current temporal 3D self-supervised model:
 
 ```bash
 hybrid-cvr train \
-  --config configs/train_temporal_hybrid_3d_v2_refine.yaml \
+  --config configs/train_cnn1d_unet3d_physiology.yaml \
   --sim-root data/simulated \
   --out data/models/self_supervised_temporal_3d
 ```
@@ -224,14 +226,14 @@ Export one synthetic prediction or run real inference:
 ```bash
 hybrid-cvr predict-sim \
   --checkpoint data/models/self_supervised_temporal_3d/stage_3_realistic_mixed_best.pt \
-  --config configs/train_temporal_hybrid_3d_v2_refine.yaml \
+  --config configs/train_cnn1d_unet3d_physiology.yaml \
   --sim-root data/simulated \
   --split test --case-id case_086 --paradigm block --tcnr 10 \
   --out data/evaluation/example_prediction
 
 hybrid-cvr infer-real \
   --checkpoint data/models/self_supervised_temporal_3d/stage_3_realistic_mixed_best.pt \
-  --config configs/train_temporal_hybrid_3d_v2_refine.yaml \
+  --config configs/train_cnn1d_unet3d_physiology.yaml \
   --subject sub-01 \
   --session ses-01 \
   --processed-root data/processed \
@@ -352,7 +354,7 @@ final metrics and plots.
 The current temporal-hybrid config is:
 
 ```text
-configs/train_temporal_hybrid_3d_v2_refine.yaml
+configs/train_cnn1d_unet3d_physiology.yaml
 ```
 
 Key settings:

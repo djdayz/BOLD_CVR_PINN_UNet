@@ -34,7 +34,7 @@ def infer_real_session(
     *,
     vessel_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run trained self-supervised U-Net/PINN on one processed real BOLD session.
+    """Run the self-supervised physiology model on one processed real BOLD session.
 
     The network was trained on BOLD PSC slices plus tissue maps. Real inference
     therefore uses the MCFLIRT-derived `bold_psc.nii.gz` and the BOLD-space masks
@@ -129,16 +129,18 @@ def infer_real_session(
         if ranged:
             valid_slices = ranged
 
-    temporal_architecture = str(run_config.get("model", {}).get("architecture", "legacy")).lower() in {
-        "temporal_3d",
-        "temporal_multidecoder",
-        "temporal_hybrid_3d",
+    architecture = str(
+        run_config.get("model", {}).get("architecture", "cnn1d_unet3d_physiology")
+    ).lower()
+    temporal_architecture = architecture in {
+        "cnn1d_unet3d_physiology",
+        "cnn1d_hybrid_3d",  # Compatibility with checkpoints from the active VM run.
     }
     if not temporal_architecture:
         raise ValueError("Real inference with this entry point requires a temporal 3D checkpoint")
 
     from hybrid_cvr.inference.sliding_window import sliding_window_parameter_inference
-    from hybrid_cvr.pinn.torch_ode import simulate_ode_bold_torch
+    from hybrid_cvr.physiology.torch_ode import simulate_ode_bold_torch
 
     features_t = torch.as_tensor(feature_volume[None], device=device, dtype=torch.float32)
     observed_t = torch.as_tensor(

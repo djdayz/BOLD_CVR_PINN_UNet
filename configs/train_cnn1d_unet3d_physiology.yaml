@@ -43,8 +43,8 @@ testing:
   save_predicted_parameter_maps: true
 
 model:
-  name: SelfSupervisedTemporal3DUNet
-  architecture: temporal_hybrid_3d
+  name: SelfSupervisedCNN1D3DUNet
+  architecture: cnn1d_unet3d_physiology
   parameterization: direct
   in_channels: auto
   spatial_dims: 3
@@ -55,6 +55,8 @@ model:
   temporal_embedding_channels: 48
   temporal_voxel_chunk_size: 16384
   joint_parameter_head: true
+  # Broad physiological initialization only; not a GT target or training prior.
+  initial_parameter_values: {delay: 25.0, T: 25.0}
   full_volume_inference: true
   T_mode: voxelwise
 
@@ -142,5 +144,5 @@ stages:
     losses: {data: 1.0, view: 0.05, nuisance: 0.0, weak: 0.0, transition_alpha: 0.0}
 
 checkpoint:
-  best_path: data/models/self_supervised_temporal_3d/best.pt
+  best_path: data/models/self_supervised_cnn1d_physiology/best.pt
   selection_metric: label_free_composite

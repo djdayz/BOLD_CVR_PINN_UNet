@@ -7,7 +7,7 @@ nib = pytest.importorskip("nibabel")
 torch = pytest.importorskip("torch")
 
 from hybrid_cvr.inference.predict_sim import predict_sim_parameter_maps
-from hybrid_cvr.training.train import train_unet_pinn
+from hybrid_cvr.training.train import train_physiology_model
 
 
 def _write_img(path: Path, data):
@@ -70,7 +70,7 @@ def _tiny_config(tmp_path):
 def test_predict_sim_writes_predicted_parameter_maps(tmp_path):
     _write_parameter_case(tmp_path / "sim" / "mida_parameters" / "case_000")
     cfg = _tiny_config(tmp_path)
-    result = train_unet_pinn(cfg, tmp_path / "sim", tmp_path / "model", max_epochs=1)
+    result = train_physiology_model(cfg, tmp_path / "sim", tmp_path / "model", max_epochs=1)
 
     pred = predict_sim_parameter_maps(
         result["best_checkpoint"],

@@ -6,7 +6,6 @@ import time
 from typing import Any
 
 from hybrid_cvr.models.constraints import ParameterRanges
-from hybrid_cvr.models.hybrid_unet_pinn import HybridUNetPINN
 from hybrid_cvr.simulation.mida_bold import load_mida_parameter_case
 from hybrid_cvr.training.on_the_fly_dataset import OnTheFlyCVRDataset, OnTheFlyDatasetConfig
 
@@ -40,10 +39,12 @@ def predict_sim_parameter_maps(
     checkpoint_config = payload.get("config") or {}
     run_config = _merged_config(checkpoint_config, config)
     dataset_cfg = dict(run_config.get("dataset", {}))
-    temporal_architecture = str(run_config.get("model", {}).get("architecture", "legacy")).lower() in {
-        "temporal_3d",
-        "temporal_multidecoder",
-        "temporal_hybrid_3d",
+    architecture = str(
+        run_config.get("model", {}).get("architecture", "cnn1d_unet3d_physiology")
+    ).lower()
+    temporal_architecture = architecture in {
+        "cnn1d_unet3d_physiology",
+        "cnn1d_hybrid_3d",  # Compatibility with checkpoints from the active VM run.
     }
     dataset_cfg.update(
         {
