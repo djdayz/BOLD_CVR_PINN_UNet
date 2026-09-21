@@ -34,7 +34,18 @@ TEMPORAL_RESPONSE_FEATURE_NAMES = (
     "psc_co2_lag_peak_norm",
 )
 
-ON_THE_FLY_FEATURE_NAMES = ("tcnr", "mask")
+ON_THE_FLY_FEATURE_NAMES = (
+    "baseline_bold",
+    "psc_mean",
+    "psc_std",
+    "psc_delta",
+    "tcnr",
+    "mask",
+    "psc_co2_beta_0lag",
+    "psc_co2_corr_0lag",
+    "psc_co2_corr_peak",
+    "psc_co2_lag_peak_norm",
+)
 
 TEMPORAL_RESPONSE_LAG_SECONDS = (0.0, 10.0, 20.0, 35.0, 50.0, 65.0, 80.0)
 
@@ -73,6 +84,7 @@ class OnTheFlyDatasetConfig:
     transition_alpha: float = 2.0
     simulation_backend: str = "cpu"
     sampling_strategy: str = "balanced_grid"
+    tcnr_probabilities: tuple[float, ...] | list[float] | None = None
     randomize_artifacts_for_training: bool = True
     etco2_noise_sd_mmhg_range: tuple[float, float] = (0.0, 0.40)
     etco2_drift_sd_mmhg_range: tuple[float, float] = (0.0, 0.25)
@@ -109,6 +121,12 @@ class OnTheFlyCVRDataset(__import__("torch").utils.data.Dataset):
             raise ValueError("simulation_backend must be cpu or torch_gpu")
         if config.sampling_strategy not in {"balanced_grid", "random"}:
             raise ValueError("sampling_strategy must be balanced_grid or random")
+        if config.tcnr_probabilities is not None:
+            probabilities = self.np.asarray(config.tcnr_probabilities, dtype=float)
+            if probabilities.size != len(config.tcnr_levels):
+                raise ValueError("tcnr_probabilities must match tcnr_levels")
+            if self.np.any(probabilities < 0) or float(probabilities.sum()) <= 0:
+                raise ValueError("tcnr_probabilities must be nonnegative with positive sum")
         self.case_dirs = self._split_case_dirs(self._discover_case_dirs())
         if not self.case_dirs:
             raise FileNotFoundError(f"No {config.split} parameter cases found under {config.sim_root}")
@@ -494,7 +512,13 @@ class OnTheFlyCVRDataset(__import__("torch").utils.data.Dataset):
     def _choose_condition(self, idx: int, rng: Any) -> tuple[str, float]:
         if self.config.sampling_strategy == "balanced_grid":
             return self.condition_grid[int(idx) % len(self.condition_grid)]
-        return str(rng.choice(self.config.paradigms)), float(rng.choice(self.config.tcnr_levels))
+        probabilities = self.config.tcnr_probabilities
+        if probabilities is not None:
+            probabilities = self.np.asarray(probabilities, dtype=float)
+            probabilities = probabilities / probabilities.sum()
+        return str(rng.choice(self.config.paradigms)), float(
+            rng.choice(self.config.tcnr_levels, p=probabilities)
+        )
 
     def _sample_artifact_settings(self, rng: Any) -> dict[str, float]:
         settings = {

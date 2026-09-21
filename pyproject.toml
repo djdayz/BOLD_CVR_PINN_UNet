@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hybrid-cvr-unet-pinn"
+name = "hybrid-cvr-physiology-model"
 version = "0.1.0"
-description = "Self-supervised hybrid U-Net/PINN for BOLD-MRI CVR mapping with an exponential-HRF ODE forward model."
+description = "Self-supervised 1D-CNN and 3D-U-Net physiology model for BOLD-MRI CVR mapping with an exponential-HRF ODE forward model."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 authors = [{ name = "Hybrid CVR Contributors" }]

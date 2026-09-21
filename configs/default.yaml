@@ -1,5 +1,5 @@
 project:
-  name: hybrid-cvr-unet-pinn
+  name: hybrid-cvr-physiology-model
   package: hybrid_cvr
 paths:
   raw: data/raw

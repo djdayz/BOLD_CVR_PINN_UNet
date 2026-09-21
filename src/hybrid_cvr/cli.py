@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - exercised before installation only
 
 
 if typer is not None:
-    app = typer.Typer(help="Hybrid CVR U-Net/PINN research pipeline.")
+    app = typer.Typer(help="Self-Supervised CVR Physiology Model research pipeline.")
     console = Console()
 else:  # pragma: no cover
     app = None
@@ -1343,14 +1343,14 @@ if typer is not None:
             cfg.setdefault("dataset", {})["case_index_path"] = str(case_index)
         if split_json is not None:
             cfg.setdefault("dataset", {})["split_json_path"] = str(split_json)
-        from hybrid_cvr.training.train import train_unet_pinn, validate_training_config
+        from hybrid_cvr.training.train import train_physiology_model, validate_training_config
 
         try:
             validate_training_config(cfg)
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
         if on_the_fly:
-            result = train_unet_pinn(
+            result = train_physiology_model(
                 cfg,
                 sim_root,
                 out,
@@ -1438,7 +1438,7 @@ if typer is not None:
 
     @app.command("summarize-training")
     def summarize_training(
-        model_dir: Path = typer.Option(Path("data/models/unet_pinn"), "--model-dir"),
+        model_dir: Path = typer.Option(Path("data/models/cvr_physiology"), "--model-dir"),
     ) -> None:
         from hybrid_cvr.training.log_summary import summarize_training_logs
 

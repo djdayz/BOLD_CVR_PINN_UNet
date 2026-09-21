@@ -192,7 +192,7 @@ def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parents[1]
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--case-dir", type=Path, default=root / "data/simulated/mida_parameters/case_000")
-    ap.add_argument("--out-dir", type=Path, default=root / "data/vm_outputs/unet_pinn_fullbrain_T_recovery/time_series_concepts")
+    ap.add_argument("--out-dir", type=Path, default=root / "data/figures/presentation")
     ap.add_argument("--slice-index", type=int, default=54)
     ap.add_argument("--flip-vertical", action=argparse.BooleanOptionalAction, default=True)
     return ap.parse_args()

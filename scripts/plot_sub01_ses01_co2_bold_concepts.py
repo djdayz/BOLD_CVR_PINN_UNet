@@ -277,7 +277,7 @@ def make_plot(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parents[1]
-    default_out = root / "data/vm_outputs/unet_pinn_fullbrain_T_recovery/time_series_concepts"
+    default_out = root / "data/figures/presentation"
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--etco2", type=Path, default=root / "data/processed/sub-01/ses-01/etco2_resampled.tsv")
     ap.add_argument("--bold-psc", type=Path, default=root / "data/processed/sub-01/ses-01/bold_psc.nii.gz")

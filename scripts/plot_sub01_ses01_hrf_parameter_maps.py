@@ -143,7 +143,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--hrf-delay", type=Path, default=root / "data/derivatives/real_cvr/sub-01/ses-01/hrf_delay.nii.gz")
     ap.add_argument("--hrf-t", type=Path, default=root / "data/derivatives/real_cvr/sub-01/ses-01/hrf_T.nii.gz")
     ap.add_argument("--brain-mask", type=Path, default=root / "data/processed/sub-01/ses-01/brain_mask.nii.gz")
-    ap.add_argument("--out-dir", type=Path, default=root / "data/vm_outputs/unet_pinn_fullbrain_T_recovery/time_series_concepts")
+    ap.add_argument("--out-dir", type=Path, default=root / "data/figures/presentation")
     ap.add_argument("--slice-index", type=int, default=25)
     ap.add_argument("--flip-vertical", action=argparse.BooleanOptionalAction, default=True)
     return ap.parse_args()

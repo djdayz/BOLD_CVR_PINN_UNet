@@ -1,7 +1,7 @@
-# Hybrid CVR U-Net/PINN
+# Self-Supervised CVR Physiology Model
 
 Research code for unsupervised/self-supervised BOLD-MRI cerebrovascular
-reactivity (CVR) mapping with a hybrid U-Net/PINN and a differentiable
+reactivity (CVR) mapping with a self-supervised 1D-CNN + 3D-U-Net physiology model and a differentiable
 first-order ODE forward model.
 
 The project estimates voxelwise:
@@ -30,18 +30,18 @@ where:
 - `tau_v` is the delay
 - `T_v` is the response time constant
 
-The neural network predicts parameter maps. The differentiable ODE solver uses
-those maps and the ETCO2 trace to reconstruct BOLD PSC. Training is
-self-supervised: the model is optimized using BOLD reconstruction, ODE residual,
-uncertainty, smoothness, prior, and consistency losses.
+The non-causal 1D CNN and 3D U-Net predict voxelwise delay and `T`. Given those
+timing maps, CVR is profiled differentiably from raw BOLD PSC and delta-ETCO2
+amplitudes after removing intercept and linear drift. The differentiable ODE
+solver then reconstructs BOLD PSC. Training is strictly self-supervised and uses
+robust Student-t reconstruction likelihood, paired-view consistency, nuisance
+regularization, and weak label-free physiological constraints.
+There is no supervised GT parameter loss, tissue-distribution target, or spatial
+smoothness loss.
 
 Ground-truth simulated maps are used to generate synthetic BOLD and to evaluate
 held-out synthetic predictions. They are not model inputs and are not used for
 checkpoint selection.
-
-Architecture diagram:
-
-![Hybrid U-Net/PINN architecture](docs/figures/hybrid_unet_pinn_architecture.png)
 
 ## Repository Layout
 
@@ -51,8 +51,7 @@ configs/
   segmentation.yaml
   real_cvr_fit.yaml
   simulation.yaml
-  train_unet_pinn.yaml
-  train_unet_pinn_fullbrain_T_recovery.yaml
+  train_cnn1d_unet3d_physiology.yaml
 
 src/hybrid_cvr/
   preprocessing/      BOLD motion correction, PSC conversion, gas processing
@@ -60,14 +59,17 @@ src/hybrid_cvr/
   cvr/                GLM and exponential-HRF/ODE real-data CVR fitting
   distributions/      Tissue-specific pooled parameter distributions
   simulation/         MIDA tissue maps and synthetic 4D BOLD generation
-  models/             U-Net/PINN model definitions
-  pinn/               ODE, delay interpolation, losses, uncertainty
+  models/             physiology-model definitions
+  physiology/        ODE, delay interpolation, losses, uncertainty
   training/           On-the-fly mixed simulation training
   inference/          Synthetic and real-subject prediction export
   visualisation/      QC plots and map summaries
 
 scripts/
-  run_post_training_prediction_exports.sh
+  run_checkpoint_grid_chunked.sh
+  summarize_self_supervised_grid.py
+  evaluate_hrf_sim_condition.py
+  summarize_hrf_sim_grid.py
 ```
 
 Large data, trained checkpoints, synthetic images, and inference outputs are
@@ -128,7 +130,7 @@ gas trace. The project has also used the external dataset at:
    pooled distributions to create partial-volume-aware GT parameter-map cases.
 10. Generate synthetic 4D BOLD from GT `CVR`, `delay`, `T`, ETCO2 paradigms, and
     tCNR-dependent noise using the ODE forward model.
-11. Train the hybrid U-Net/PINN on-the-fly with mixed cases, slices, ETCO2
+11. Train the self-supervised 1D-CNN + 3D-U-Net physiology model on-the-fly with mixed cases, slices, ETCO2
     paradigms, tCNR levels, seeds, drift, motion spikes, and ETCO2 noise.
 12. Export predicted maps for held-out synthetic validation/test conditions and
     run inference on real MCFLIRT-processed BOLD images.
@@ -199,7 +201,7 @@ hybrid-cvr generate-mida-parameter-maps \
   --config configs/simulation.yaml
 
 hybrid-cvr prepare-case-index \
-  --config configs/train_unet_pinn_fullbrain_T_recovery.yaml
+  --config configs/train_cnn1d_unet3d_physiology.yaml
 ```
 
 Generate synthetic BOLD QC examples:
@@ -210,26 +212,28 @@ hybrid-cvr simulate \
   --out data/simulated/bold4d
 ```
 
-Train the current full-brain T-recovery model:
+Train the current temporal 3D self-supervised model:
 
 ```bash
 hybrid-cvr train \
-  --config configs/train_unet_pinn_fullbrain_T_recovery.yaml \
+  --config configs/train_cnn1d_unet3d_physiology.yaml \
   --sim-root data/simulated \
-  --out data/models/unet_pinn_fullbrain_T_recovery
+  --out data/models/self_supervised_temporal_3d
 ```
 
-Export synthetic validation/test predictions and run real inference:
+Export one synthetic prediction or run real inference:
 
 ```bash
-scripts/run_post_training_prediction_exports.sh \
-  data/models/unet_pinn_fullbrain_T_recovery \
-  data/models/unet_pinn_fullbrain_T_recovery/predicted_maps_validation \
-  data/models/unet_pinn_fullbrain_T_recovery/predicted_maps
+hybrid-cvr predict-sim \
+  --checkpoint data/models/self_supervised_temporal_3d/stage_3_realistic_mixed_best.pt \
+  --config configs/train_cnn1d_unet3d_physiology.yaml \
+  --sim-root data/simulated \
+  --split test --case-id case_086 --paradigm block --tcnr 10 \
+  --out data/evaluation/example_prediction
 
 hybrid-cvr infer-real \
-  --checkpoint data/models/unet_pinn_fullbrain_T_recovery/best.pt \
-  --config configs/train_unet_pinn_fullbrain_T_recovery.yaml \
+  --checkpoint data/models/self_supervised_temporal_3d/stage_3_realistic_mixed_best.pt \
+  --config configs/train_cnn1d_unet3d_physiology.yaml \
   --subject sub-01 \
   --session ses-01 \
   --processed-root data/processed \
@@ -311,9 +315,6 @@ The currently used ETCO2 paradigms are:
 - `block`
 - `multi_step`
 - `pseudo_random_binary`
-- `sinusoidal`
-- `breath_hold_like`
-- `resting_state_like`
 
 The current tCNR grid is:
 
@@ -343,11 +344,9 @@ Each batch randomly samples:
 
 Validation uses held-out validation parameter-map cases with fixed
 seeds/configs, so validation losses are comparable across epochs. Checkpoint
-selection uses self-supervised validation losses only, not GT parameter metrics.
-The primary temporal-hybrid experiment additionally uses synthetic GT parameter
-losses on training cases only. It is therefore simulation-supervised/hybrid,
-not unsupervised. The physics-only configuration remains available as an
-ablation.
+selection uses label-free validation losses only, not GT parameter metrics. GT
+parameter maps generate synthetic BOLD but are never passed to the network or
+used in the training loss.
 
 Testing uses held-out test parameter-map cases. GT maps are allowed only here for
 final metrics and plots.
@@ -355,7 +354,7 @@ final metrics and plots.
 The current temporal-hybrid config is:
 
 ```text
-configs/train_temporal_hybrid_3d.yaml
+configs/train_cnn1d_unet3d_physiology.yaml
 ```
 
 Key settings:
@@ -363,74 +362,39 @@ Key settings:
 ```text
 patch size: 32 x 32 x 24 at 2.5 mm
 temporal input: complete 480-point BOLD PSC + ETCO2 + time
-temporal encoder: shared strided 1D CNN, 32-channel voxel embedding
+temporal encoder: shared strided 1D CNN, 24-channel voxel embedding
 spatial model: 3D U-Net with parameter-specific residual decoders
-parameterization: log(g), log(k), delay; T=1/k and CVR=g/k
-train cases: 60
-validation cases: 20
-test cases: 20
-epochs: 400
-stage 1: 60 epochs, clean/high-tCNR identification
-stage 2: 100 epochs, normalized timing/physics losses
-stage 3: 200 epochs, robust mixed conditions
-stage 4: 40 epochs, low-tCNR stress with clean/moderate replay
+parameterization: direct voxelwise CVR, delay, and T
+split fractions: 70% train, 15% validation, 15% test
+epochs: 1000
+stage 1: 200 epochs, clean/high-tCNR identification
+stage 2: 300 epochs, moderate noise and paired-view consistency
+stage 3: 400 epochs, robust mixed conditions and model mismatch
+stage 4: 100 epochs, very-low-tCNR stress testing
 learning rate scheduler: none
-checkpoint metric: self-supervised validation loss
+checkpoint metric: label-free validation composite
 ```
 
 ## Current Local Outputs
 
-Latest pulled full-brain model outputs are stored locally at:
+Current fixed-grid synthetic evaluations and conventional HRF benchmarks are:
 
 ```text
-data/vm_outputs/unet_pinn_fullbrain_T_recovery/
+data/evaluation/self_supervised_temporal_3d_stage2_grid/
+data/evaluation/self_supervised_temporal_3d_stage3_grid/
+data/evaluation/hrf_conventional_test_grid/
 ```
 
-Real-subject inference outputs are stored locally at:
+Aggregate result tables are:
 
 ```text
-data/vm_outputs/real_inference_unet_pinn_fullbrain_T_recovery_20260909_052143/
+data/evaluation/stage2_vs_stage3_overall_metrics.csv
+data/evaluation/hrf_conventional_test_grid/test_overall_metrics.csv
+data/evaluation/hrf_conventional_test_grid/test_condition_metrics.csv
 ```
 
-The latest full-brain run summary:
-
-```text
-trained_epochs: 360
-best_self_supervised_validation_loss: 6.2737895
-best_checkpoint: data/models/unet_pinn_fullbrain_T_recovery/best.pt
-device: cuda
-train_cases: 60
-validation_cases: 20
-feature_channels: 15  # historical run before temporal-response feature channels
-```
-
-Pulled prediction counts:
-
-```text
-validation predicted_CVR maps: 126
-test predicted_CVR maps: 126
-real predicted_CVR maps: 30
-real QC reports: 30
-```
-
-Mean synthetic held-out absolute errors from
-`validation_test_prediction_summary.csv`:
-
-```text
-split       CVR error   delay error   T error
-validation  0.0313      10.9558 s     19.7741 s
-test        0.0305      10.1692 s     18.8968 s
-```
-
-Useful local files:
-
-```text
-data/vm_outputs/unet_pinn_fullbrain_T_recovery/STATUS.txt
-data/vm_outputs/unet_pinn_fullbrain_T_recovery/validation_test_prediction_summary.csv
-data/vm_outputs/unet_pinn_fullbrain_T_recovery/predicted_maps_validation/
-data/vm_outputs/unet_pinn_fullbrain_T_recovery/predicted_maps/
-data/vm_outputs/real_inference_unet_pinn_fullbrain_T_recovery_20260909_052143/
-```
+Real-subject inference outputs are written under
+`data/derivatives/real_inference/<subject>/<session>/`.
 
 Each real inference folder contains:
 
@@ -451,7 +415,7 @@ slice_summary.csv
 Open a real-subject QC report:
 
 ```bash
-open data/vm_outputs/real_inference_unet_pinn_fullbrain_T_recovery_20260909_052143/sub-01/ses-01/real_inference_qc_report.png
+open data/derivatives/real_inference/sub-01/ses-01/real_inference_qc_report.png
 ```
 
 View real inference maps in FSLeyes:
@@ -459,17 +423,17 @@ View real inference maps in FSLeyes:
 ```bash
 fsleyes \
   data/processed/sub-01/ses-01/mean_bold.nii.gz \
-  data/vm_outputs/real_inference_unet_pinn_fullbrain_T_recovery_20260909_052143/sub-01/ses-01/predicted_CVR.nii.gz \
-  data/vm_outputs/real_inference_unet_pinn_fullbrain_T_recovery_20260909_052143/sub-01/ses-01/predicted_delay.nii.gz \
-  data/vm_outputs/real_inference_unet_pinn_fullbrain_T_recovery_20260909_052143/sub-01/ses-01/predicted_T.nii.gz \
-  data/vm_outputs/real_inference_unet_pinn_fullbrain_T_recovery_20260909_052143/sub-01/ses-01/predicted_uncertainty_sigma.nii.gz
+  data/derivatives/real_inference/sub-01/ses-01/predicted_CVR.nii.gz \
+  data/derivatives/real_inference/sub-01/ses-01/predicted_delay.nii.gz \
+  data/derivatives/real_inference/sub-01/ses-01/predicted_T.nii.gz \
+  data/derivatives/real_inference/sub-01/ses-01/predicted_uncertainty_sigma.nii.gz
 ```
 
 Open synthetic prediction QC:
 
 ```bash
-open data/vm_outputs/unet_pinn_fullbrain_T_recovery/predicted_maps_validation/case_060/pseudo_random_binary/tcnr_10.0/predicted_maps_qc.png
-open data/vm_outputs/unet_pinn_fullbrain_T_recovery/predicted_maps_validation/case_060/pseudo_random_binary/tcnr_10.0/prediction_error_uncertainty_qc.png
+open data/evaluation/self_supervised_temporal_3d_stage3_grid/test/case_086/pseudo_random_binary/tcnr_10.0/predicted_maps_qc.png
+open data/evaluation/self_supervised_temporal_3d_stage3_grid/test/case_086/pseudo_random_binary/tcnr_10.0/prediction_error_uncertainty_qc.png
 ```
 
 `parameter_error_uncertainty_from_GT.nii.gz` exists only for synthetic
@@ -519,7 +483,8 @@ Real-data CVR maps used for pooling are not true ground truth. ETCO2 is a proxy
 for arterial CO2. BOLD-CVR is affected by motion, physiological noise, baseline
 signal, vascular artifacts, partial volume, and scanner/session effects. Delay
 and `T` can be partially non-identifiable, especially for simple or low-SNR ETCO2
-paradigms. The current network is slice-based/2.5D rather than full 3D.
+paradigms. The current model processes overlapping 3D patches with the complete
+BOLD time series; sliding-window blending may still soften fine boundaries.
 Uncertainty maps are research QC indicators, not clinical confidence scores.
 Independent validation is required before any scientific claim is treated as
 robust.

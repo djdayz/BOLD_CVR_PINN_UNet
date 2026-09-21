@@ -8,15 +8,14 @@ import time
 from typing import Any
 
 from hybrid_cvr.models.constraints import ParameterRanges
-from hybrid_cvr.models.hybrid_unet_pinn import HybridUNetPINN
-from hybrid_cvr.models.temporal_hybrid_3d import TemporalHybridUNetPINN
-from hybrid_cvr.pinn.losses import (
+from hybrid_cvr.models.cnn1d_unet3d_physiology import CNN1DUNet3DPhysiologyModel
+from hybrid_cvr.physiology.losses import (
     LossWeights,
     assert_no_supervised_parameter_loss,
     consistency_loss,
     self_supervised_loss,
 )
-from hybrid_cvr.pinn.torch_ode import simulate_ode_bold_torch
+from hybrid_cvr.physiology.torch_ode import simulate_ode_bold_torch
 from hybrid_cvr.simulation.mida_bold import TISSUE_FRACTION_NAMES
 from hybrid_cvr.training.checkpointing import save_checkpoint
 from hybrid_cvr.training.on_the_fly_dataset import (
@@ -44,7 +43,7 @@ def validate_training_config(config: dict) -> None:
         assert_no_supervised_parameter_loss({}, dict(stage).get("losses", {}))
 
 
-def train_unet_pinn(
+def train_physiology_model(
     config: dict[str, Any],
     sim_root: str | Path,
     out_dir: str | Path,
@@ -167,6 +166,12 @@ def train_unet_pinn(
                 train=True,
                 gradient_accumulation_steps=grad_accum_steps,
             )
+            validate_every = max(1, int(training_cfg.get("validate_every_epochs", 1)))
+            should_validate = bool(validate) and (
+                stage_epoch == 1
+                or stage_epoch == stage_epochs
+                or stage_epoch % validate_every == 0
+            )
             val_metrics = (
                 _run_epoch(
                     model,
@@ -180,11 +185,11 @@ def train_unet_pinn(
                     train=False,
                     gradient_accumulation_steps=1,
                 )
-                if validate
-                else train_metrics
+                if should_validate
+                else {key: float("nan") for key in train_metrics}
             )
             val_total = float(val_metrics["total"])
-            if scheduler is not None:
+            if scheduler is not None and should_validate:
                 scheduler.step(val_total)
             lr = float(optimizer.param_groups[0]["lr"])
             row = {
@@ -218,7 +223,7 @@ def train_unet_pinn(
                 stage_name,
                 case_split_metadata,
             )
-            if val_total < best_loss:
+            if should_validate and val_total < best_loss:
                 best_loss = val_total
                 _save_training_checkpoint(
                     best_path,
@@ -235,7 +240,7 @@ def train_unet_pinn(
                     case_split_metadata,
                 )
             stage_best = stage_best_losses.get(stage_name, float("inf"))
-            if val_total < stage_best:
+            if should_validate and val_total < stage_best:
                 stage_best_losses[stage_name] = val_total
                 _save_training_checkpoint(
                     out / _stage_checkpoint_name(stage_name),
@@ -332,7 +337,7 @@ def _run_epoch(
                     etco2=batch["etco2_for_model"],
                     time_grid=time_grid,
                     mask=batch["mask"],
-                    tissue_maps=batch.get("tissue_maps"),
+                    tissue_maps=None,
                     bold_psc=batch["bold_psc"],
                     valid_time_mask=batch.get("valid_time_mask"),
                 )
@@ -343,7 +348,7 @@ def _run_epoch(
                         etco2=batch["consistency_etco2_for_model"],
                         time_grid=time_grid,
                         mask=batch["mask"],
-                        tissue_maps=batch.get("tissue_maps"),
+                        tissue_maps=None,
                         bold_psc=batch["consistency_bold_psc"],
                         valid_time_mask=batch.get("valid_time_mask"),
                     )
@@ -369,8 +374,13 @@ def _run_epoch(
             totals[key] = totals.get(key, 0.0) + float(value.detach().cpu())
         for key in ("cvr", "delay", "T", "sigma_y"):
             if key in pred:
+                values = pred[key].detach()
+                brain = batch["mask"] > 0.5
+                while brain.ndim < values.ndim:
+                    brain = brain.unsqueeze(1)
+                selected = values[brain.expand_as(values)]
                 totals[f"mean_{key}"] = totals.get(f"mean_{key}", 0.0) + float(
-                    pred[key].detach().mean().cpu()
+                    selected.mean().cpu() if selected.numel() else values.mean().cpu()
                 )
         count += 1
     return {key: value / max(count, 1) for key, value in totals.items()}
@@ -858,11 +868,16 @@ def _make_dataset(
             "model_mismatch_probability",
             "model_mismatch_strength_range",
             "consistency_mode",
+            "sampling_strategy",
+            "tcnr_probabilities",
         ):
             if key in stage_cfg:
                 dataset_cfg[key] = stage_cfg[key]
     dataset_cfg["sim_root"] = Path(sim_root)
     dataset_cfg["split"] = split
+    if split in {"val", "validation"}:
+        dataset_cfg["sampling_strategy"] = "balanced_grid"
+        dataset_cfg["tcnr_probabilities"] = None
     if samples_per_epoch is not None:
         dataset_cfg["samples_per_epoch"] = int(samples_per_epoch)
     stage_loss_cfg = _stage_loss_config(config.get("losses", {}), stage_cfg.get("losses") if stage_cfg else None)
@@ -905,32 +920,24 @@ def _stage_loss_config(base_loss_cfg: dict[str, Any], stage_losses: Any) -> dict
 def _build_model(config: dict[str, Any], in_channels: int):
     model_cfg = config.get("model", {})
     ranges = ParameterRanges(**config.get("parameter_ranges", {}))
-    architecture = str(model_cfg.get("architecture", "legacy")).lower()
-    if architecture in {"temporal_3d", "temporal_multidecoder", "temporal_hybrid_3d"}:
-        return TemporalHybridUNetPINN(
-            in_channels=in_channels,
-            base_channels=int(model_cfg.get("base_channels", 24)),
-            depth=int(model_cfg.get("depth", 3)),
-            norm=str(model_cfg.get("norm", "instance")),
-            dropout=float(model_cfg.get("dropout", 0.05)),
-            temporal_embedding_channels=int(model_cfg.get("temporal_embedding_channels", 32)),
-            parameter_ranges=ranges,
-            parameterization=str(model_cfg.get("parameterization", "direct")),
-            g_min=float(model_cfg.get("g_min", 1e-5)),
-            g_max=float(model_cfg.get("g_max", 0.9)),
-            k_min=float(model_cfg.get("k_min", 0.01)),
-            k_max=float(model_cfg.get("k_max", 0.5)),
+    architecture = str(model_cfg.get("architecture", "cnn1d_unet3d_physiology")).lower()
+    supported = {"cnn1d_unet3d_physiology", "cnn1d_hybrid_3d"}
+    if architecture not in supported:
+        raise ValueError(
+            "Only model.architecture=cnn1d_unet3d_physiology is supported"
         )
-    return HybridUNetPINN(
+    return CNN1DUNet3DPhysiologyModel(
         in_channels=in_channels,
-        base_channels=int(model_cfg.get("base_channels", 32)),
+        base_channels=int(model_cfg.get("base_channels", 24)),
         depth=int(model_cfg.get("depth", 3)),
         norm=str(model_cfg.get("norm", "instance")),
         dropout=float(model_cfg.get("dropout", 0.05)),
+        temporal_embedding_channels=int(model_cfg.get("temporal_embedding_channels", 32)),
+        temporal_voxel_chunk_size=int(model_cfg.get("temporal_voxel_chunk_size", 16384)),
         parameter_ranges=ranges,
-        T_mode=str(model_cfg.get("T_mode", "tissuewise")),
-        spatial_dims=int(model_cfg.get("spatial_dims", 2)),
-        T_residual_scale=float(model_cfg.get("T_residual_scale", 25.0)),
+        parameterization=str(model_cfg.get("parameterization", "direct")),
+        joint_parameter_head=bool(model_cfg.get("joint_parameter_head", False)),
+        initial_parameter_values=dict(model_cfg.get("initial_parameter_values", {})),
     )
 
 

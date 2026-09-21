@@ -2,8 +2,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from hybrid_cvr.pinn.delay_interp import interpolate_delayed_1d
-from hybrid_cvr.pinn.torch_ode import simulate_ode_bold_torch
+from hybrid_cvr.physiology.delay_interp import interpolate_delayed_1d
+from hybrid_cvr.physiology.torch_ode import simulate_ode_bold_torch
 
 
 def test_differentiable_delay_interpolation_and_gradients():

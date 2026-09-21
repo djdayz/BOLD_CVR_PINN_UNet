@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hybrid_cvr.pinn.delay_interp import interpolate_delayed_1d
+from hybrid_cvr.physiology.delay_interp import interpolate_delayed_1d
 
 
 def simulate_ode_bold_torch(

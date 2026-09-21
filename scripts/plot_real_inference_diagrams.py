@@ -18,16 +18,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--real-inference-root",
         type=Path,
-        default=Path(
-            "data/vm_outputs/real_inference_unet_pinn_fullbrain_T_recovery_20260909_052143"
-        ),
+        default=Path("data/derivatives/real_inference"),
     )
     parser.add_argument("--processed-root", type=Path, default=Path("data/processed"))
     parser.add_argument("--real-cvr-root", type=Path, default=Path("data/derivatives/real_cvr"))
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("data/vm_outputs/unet_pinn_fullbrain_T_recovery/real_inference_diagrams"),
+        default=Path("data/figures/presentation/real_inference"),
     )
     parser.add_argument(
         "--conventional",
