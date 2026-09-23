@@ -19,6 +19,9 @@ def real_inference_outputs() -> list[str]:
         "predicted_delay.nii.gz",
         "predicted_T.nii.gz",
         "predicted_uncertainty_sigma.nii.gz",
+        "predicted_CVR_uncertainty_percent.nii.gz",
+        "predicted_delay_uncertainty_percent.nii.gz",
+        "predicted_T_uncertainty_percent.nii.gz",
         "reconstructed_BOLD_PSC_mean.nii.gz",
         "residual_rms.nii.gz",
         "real_inference_qc_report.png",
@@ -110,6 +113,9 @@ def infer_real_session(
     pred_delay = np.zeros(spatial_shape, dtype=np.float32)
     pred_T = np.zeros(spatial_shape, dtype=np.float32)
     pred_sigma = np.zeros(spatial_shape, dtype=np.float32)
+    pred_sigma_cvr = np.zeros(spatial_shape, dtype=np.float32)
+    pred_sigma_delay = np.zeros(spatial_shape, dtype=np.float32)
+    pred_sigma_T = np.zeros(spatial_shape, dtype=np.float32)
     recon_mean = np.zeros(spatial_shape, dtype=np.float32)
     residual_rms = np.zeros(spatial_shape, dtype=np.float32)
     eval_mask = np.zeros(spatial_shape, dtype=bool)
@@ -163,7 +169,7 @@ def infer_real_session(
             )
             prediction = {
                 key: direct[key][0]
-                for key in ("cvr", "delay", "T", "sigma")
+                for key in ("cvr", "delay", "T", "sigma", "sigma_cvr", "sigma_delay", "sigma_T")
             }
             prediction["coverage"] = mask_t[0] > 0.5
         else:
@@ -194,7 +200,22 @@ def infer_real_session(
     pred_delay = prediction["delay"].cpu().numpy().astype(np.float32)
     pred_T = prediction["T"].cpu().numpy().astype(np.float32)
     pred_sigma = prediction["sigma"].cpu().numpy().astype(np.float32)
-    eval_mask = prediction["coverage"].cpu().numpy().astype(bool)
+    pred_sigma_cvr = prediction["sigma_cvr"].cpu().numpy().astype(np.float32)
+    pred_sigma_delay = prediction["sigma_delay"].cpu().numpy().astype(np.float32)
+    pred_sigma_T = prediction["sigma_T"].cpu().numpy().astype(np.float32)
+    eval_mask = prediction["coverage"].cpu().numpy().astype(bool) & mask
+    for volume in (
+        pred_cvr,
+        pred_delay,
+        pred_T,
+        pred_sigma,
+        pred_sigma_cvr,
+        pred_sigma_delay,
+        pred_sigma_T,
+        recon_mean,
+        residual_rms,
+    ):
+        volume[~eval_mask] = 0.0
     for idx in valid_slices:
         sl_mask = np.take(eval_mask, idx, axis=slice_axis)
         if not np.any(sl_mask):
@@ -230,6 +251,21 @@ def infer_real_session(
         ),
         "residual_rms": _save_float_nifti(residual_rms, psc_img, out / "residual_rms.nii.gz", nib),
     }
+    for name, sigma, prediction_map in (
+        ("CVR", pred_sigma_cvr, pred_cvr),
+        ("delay", pred_sigma_delay, pred_delay),
+        ("T", pred_sigma_T, pred_T),
+    ):
+        percent = np.zeros_like(prediction_map, dtype=np.float32)
+        percent[eval_mask] = 100.0 * sigma[eval_mask] / np.maximum(
+            np.abs(prediction_map[eval_mask]), 1e-6
+        )
+        outputs[f"predicted_{name}_uncertainty"] = _save_float_nifti(
+            sigma, psc_img, out / f"predicted_{name}_uncertainty.nii.gz", nib
+        )
+        outputs[f"predicted_{name}_uncertainty_percent"] = _save_float_nifti(
+            percent, psc_img, out / f"predicted_{name}_uncertainty_percent.nii.gz", nib
+        )
     _write_slice_summary(out / "slice_summary.csv", slice_rows)
     _write_qc_png(out / "real_inference_qc_report.png", pred_cvr, pred_delay, pred_T, pred_sigma, residual_rms, eval_mask, plt, np)
     metadata = {

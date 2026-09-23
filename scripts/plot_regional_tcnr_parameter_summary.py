@@ -68,12 +68,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split-name", default="test", help="Name used in output filenames/titles.")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
+        "--real-cvr-root",
+        type=Path,
+        default=Path("data/derivatives/real_cvr"),
+        help="Root containing real sub-*/ses-*/tCNR.nii.gz maps.",
+    )
+    parser.add_argument(
         "--mask-mode",
         choices=("dominant_label", "nonzero_prediction"),
         default="dominant_label",
         help="Region mask source. dominant_label uses GT_region_labels values 1/2/3.",
     )
     return parser.parse_args()
+
+
+def real_tcnr_interval(real_cvr_root: Path) -> tuple[float, float, float]:
+    session_medians: list[float] = []
+    for path in sorted(real_cvr_root.glob("sub-*/ses-*/tCNR.nii.gz")):
+        values = load_nifti(path)
+        mask_path = path.parent / "valid_fit_mask.nii.gz"
+        mask = load_nifti(mask_path) > 0 if mask_path.exists() else values > 0
+        valid = values[mask & np.isfinite(values) & (values > 0)]
+        if valid.size:
+            session_medians.append(float(np.median(valid)))
+    if not session_medians:
+        raise FileNotFoundError(f"No valid real tCNR maps found under {real_cvr_root}")
+    low, center, high = np.percentile(session_medians, [10, 50, 90])
+    return float(low), float(center), float(high)
 
 
 def case_ground_truth(case_id: str, gt_root: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -225,6 +246,7 @@ def plot_grid(
     split_name: str,
     out_png: Path,
     out_pdf: Path,
+    real_tcnr: tuple[float, float, float],
 ) -> None:
     def secondary_axis_functions(gt_mean: float, scale: float):
         def to_relative_error(y: float | np.ndarray) -> float | np.ndarray:
@@ -236,6 +258,7 @@ def plot_grid(
         return to_relative_error, from_relative_error
 
     fig, axes = plt.subplots(3, 3, figsize=(15.0, 11.0), sharex=True, constrained_layout=True)
+    real_low, _, real_high = real_tcnr
 
     for row, (parameter, parameter_spec) in enumerate(PARAMETERS.items()):
         for col, (region, region_spec) in enumerate(REGIONS.items()):
@@ -247,6 +270,16 @@ def plot_grid(
             gt_mean = float(item["gt_mean"])
             gt_median = float(item["gt_median"])
             scale = max(abs(gt_mean), 1e-6)
+
+            ax.axvspan(
+                real_low,
+                real_high,
+                color="#8ecae6",
+                alpha=0.28,
+                linewidth=0,
+                label="Real BOLD tCNR range" if row == 0 and col == 0 else None,
+                zorder=0,
+            )
 
             ax.errorbar(
                 tcnr,
@@ -297,10 +330,15 @@ def main() -> None:
     summary = summarize(records, gt_values, csv_path)
     out_png = args.out_dir / f"{args.split_name}_regional_3x3_parameter_vs_tcnr.png"
     out_pdf = args.out_dir / f"{args.split_name}_regional_3x3_parameter_vs_tcnr.pdf"
-    plot_grid(summary, args.split_name, out_png, out_pdf)
+    real_tcnr = real_tcnr_interval(args.real_cvr_root)
+    plot_grid(summary, args.split_name, out_png, out_pdf, real_tcnr)
     print(f"Saved {out_png}")
     print(f"Saved {out_pdf}")
     print(f"Saved {csv_path}")
+    print(
+        "Real BOLD tCNR band (10th-90th percentile of session medians): "
+        f"{real_tcnr[0]:.3f}-{real_tcnr[2]:.3f}; median={real_tcnr[1]:.3f}"
+    )
 
 
 if __name__ == "__main__":

@@ -65,6 +65,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--sim-root", type=Path, required=True)
     parser.add_argument("--case-id", required=True)
+    parser.add_argument("--split", choices=("validation", "test"), default="test")
     parser.add_argument("--paradigm", required=True)
     parser.add_argument("--tcnr", type=float, required=True)
     parser.add_argument("--out", type=Path, required=True)
@@ -84,7 +85,7 @@ def main() -> None:
     dataset_cfg = dict(run_config.get("dataset", {}))
     dataset_cfg.update(
         sim_root=args.sim_root,
-        split="test",
+        split="val" if args.split == "validation" else "test",
         samples_per_epoch=1,
         slice_mode="full_volume",
         paradigms=(args.paradigm,),
@@ -141,7 +142,7 @@ def main() -> None:
 
     metadata = {
         "case_id": args.case_id,
-        "split": "test",
+        "split": args.split,
         "paradigm": args.paradigm,
         "target_tcnr": args.tcnr,
         "simulation_generation_seconds": simulation_seconds,

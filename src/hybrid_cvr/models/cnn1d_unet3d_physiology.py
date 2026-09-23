@@ -138,6 +138,30 @@ class JointPhysiologyHead(__import__("torch").nn.Module):
         return self.net(x)
 
 
+class CVRResidualHead(__import__("torch").nn.Module):
+    """Locally refine physically profiled CVR without normalising its amplitude."""
+
+    def __init__(self, in_channels: int, hidden: int):
+        super().__init__()
+        nn = __import__("torch").nn
+        self.net = nn.Sequential(
+            nn.Conv3d(in_channels, hidden, 1),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(hidden, hidden, 3, padding=1),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(hidden, 2, 1),
+        )
+        # Begin exactly at the physical profile. The correction learns first;
+        # the reliability gate opens only where reconstruction supports it.
+        with __import__("torch").no_grad():
+            self.net[-1].weight.zero_()
+            self.net[-1].bias[0] = 0.0
+            self.net[-1].bias[1] = -2.0
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class CNN1DUNet3DPhysiologyModel(__import__("torch").nn.Module):
     """Full-time 1D CNN + 3D U-Net with differentiable profiled CVR."""
 
@@ -148,6 +172,9 @@ class CNN1DUNet3DPhysiologyModel(__import__("torch").nn.Module):
                  parameterization: str = "direct", joint_parameter_head: bool = False,
                  temporal_voxel_chunk_size: int = 16384,
                  initial_parameter_values: dict[str, float] | None = None,
+                 cvr_residual_head: bool = True,
+                 cvr_residual_channels: int = 24,
+                 cvr_log_correction_limit: float = 0.6931471805599453,
                  **_: object):
         super().__init__()
         if parameterization != "direct":
@@ -155,6 +182,8 @@ class CNN1DUNet3DPhysiologyModel(__import__("torch").nn.Module):
         self.parameter_ranges = parameter_ranges or ParameterRanges()
         self.parameterization, self.T_mode = parameterization, "voxelwise"
         self.joint_parameter_head = bool(joint_parameter_head)
+        self.use_cvr_residual_head = bool(cvr_residual_head)
+        self.cvr_log_correction_limit = float(cvr_log_correction_limit)
         self.temporal_encoder = VoxelwiseCNN1D(
             temporal_embedding_channels, voxel_chunk_size=temporal_voxel_chunk_size
         )
@@ -175,6 +204,12 @@ class CNN1DUNet3DPhysiologyModel(__import__("torch").nn.Module):
         })
         self.observation_uncertainty_head = SpatialHead(base_channels, max(8, base_channels // 2), norm)
         self.joint_head = JointPhysiologyHead(base_channels, base_channels, norm)
+        # Five physical-unit maps: profiled CVR, covariance, response RMS,
+        # observed-BOLD RMS and residual RMS. No normalization is used here.
+        cvr_inputs = base_channels + temporal_embedding_channels + 5
+        self.cvr_residual_head = CVRResidualHead(
+            cvr_inputs, max(8, int(cvr_residual_channels))
+        )
         self._initialize_joint_head(initial_parameter_values or {})
 
     def _initialize_joint_head(self, initial_values: dict[str, float]) -> None:
@@ -230,16 +265,46 @@ class CNN1DUNet3DPhysiologyModel(__import__("torch").nn.Module):
                 for p in ("cvr", "delay", "T")
             }
             log_scale = self.observation_uncertainty_head(shared).clamp(-5, 3)
-        unit_response = simulate_ode_bold_torch(
-            torch.ones_like(values["delay"]), values["delay"], values["T"],
-            etco2, time_grid, mask=mask, method="exact",
+        # The recurrent ODE and least-squares ratios are numerically sensitive
+        # in fp16. Keep the expensive learned encoders under AMP, but always run
+        # the physical inverse problem in fp32 so GradScaler does not skip steps.
+        with torch.autocast(device_type=bold_psc.device.type, enabled=False):
+            delay_fp32 = values["delay"].float()
+            T_fp32 = values["T"].float()
+            bold_fp32 = bold_psc.float()
+            etco2_fp32 = etco2.float()
+            time_fp32 = time_grid.float()
+            mask_fp32 = mask.float() if mask is not None else None
+            valid_fp32 = valid_time_mask.float() if valid_time_mask is not None else None
+            unit_response = simulate_ode_bold_torch(
+                torch.ones_like(delay_fp32), delay_fp32, T_fp32,
+                etco2_fp32, time_fp32, mask=mask_fp32, method="exact",
+            )
+            cvr_profile, amplitude_maps = self._profile_cvr(
+                unit_response, bold_fp32, time_fp32, valid_fp32, mask_fp32
+            )
+        cvr_gate = torch.zeros_like(cvr_profile)
+        cvr_factor = torch.ones_like(cvr_profile)
+        if self.use_cvr_residual_head:
+            correction = self.cvr_residual_head(torch.cat(
+                [shared, temporal, amplitude_maps.to(shared.dtype)], dim=1
+            ))
+            delta_log_cvr = torch.tanh(correction[:, 0])
+            cvr_gate = torch.sigmoid(correction[:, 1])
+            cvr_factor = torch.exp(
+                self.cvr_log_correction_limit * cvr_gate * delta_log_cvr
+            )
+        values["cvr"] = (cvr_profile * cvr_factor).clamp(
+            self.parameter_ranges.cvr_min, self.parameter_ranges.cvr_max
         )
-        values["cvr"] = self._profile_cvr(
-            unit_response, bold_psc, time_grid, valid_time_mask, mask
-        )
+        if mask is not None:
+            values["cvr"] = values["cvr"] * mask.to(values["cvr"])
         coarse["cvr"] = values["cvr"]
-        physiology = unit_response * values["cvr"].unsqueeze(1)
-        reconstruction, nuisance = self._profile_nuisance(physiology, bold_psc, time_grid, mask)
+        with torch.autocast(device_type=bold_psc.device.type, enabled=False):
+            physiology = unit_response * values["cvr"].float().unsqueeze(1)
+            reconstruction, nuisance = self._profile_nuisance(
+                physiology, bold_psc.float(), time_grid.float(), mask_fp32
+            )
         parameter_sigma = {p: torch.exp(0.5 * log_vars[p]) for p in values}
         combined_sigma = (
             parameter_sigma["cvr"] / 1.8
@@ -248,6 +313,8 @@ class CNN1DUNet3DPhysiologyModel(__import__("torch").nn.Module):
         ) / 3.0
         return {
             "shared": shared, "temporal_embedding": temporal, "raw": raw, "coarse": coarse,
+            "cvr_profile": cvr_profile, "cvr_correction_factor": cvr_factor,
+            "cvr_correction_gate": cvr_gate,
             **values, "bold_psc_physiology": physiology, "bold_psc_hat": reconstruction,
             "nuisance_coefficients": nuisance, "observation_log_scale": log_scale,
             "sigma_y": torch.nn.functional.softplus(log_scale) + 0.03,
@@ -281,13 +348,28 @@ class CNN1DUNet3DPhysiologyModel(__import__("torch").nn.Module):
 
         x = remove_intercept_and_drift(unit_response)
         y = remove_intercept_and_drift(observed)
-        numerator = (weight * x * y).sum(1)
-        energy = (weight * x.square()).sum(1).clamp_min(1e-6)
-        cvr = numerator / energy
+        covariance = (weight * x * y).sum(1) / denominator
+        response_energy = (weight * x.square()).sum(1) / denominator
+        observed_energy = (weight * y.square()).sum(1) / denominator
+        cvr = covariance / response_energy.clamp_min(1e-6)
         cvr = cvr.clamp(self.parameter_ranges.cvr_min, self.parameter_ranges.cvr_max)
+        residual = y - cvr.unsqueeze(1) * x
+        residual_energy = (weight * residual.square()).sum(1) / denominator
+        amplitude_maps = torch.stack(
+            [
+                cvr,
+                covariance,
+                (response_energy.clamp_min(0.0) + 1e-6).sqrt(),
+                (observed_energy.clamp_min(0.0) + 1e-6).sqrt(),
+                (residual_energy.clamp_min(0.0) + 1e-6).sqrt(),
+            ],
+            dim=1,
+        )
         if mask is not None:
-            cvr = cvr * mask.to(device=cvr.device, dtype=cvr.dtype)
-        return cvr
+            spatial_mask = mask.to(device=cvr.device, dtype=cvr.dtype)
+            cvr = cvr * spatial_mask
+            amplitude_maps = amplitude_maps * spatial_mask.unsqueeze(1)
+        return cvr, amplitude_maps
 
     @staticmethod
     def _profile_nuisance(physiology, observed, time_grid, mask):

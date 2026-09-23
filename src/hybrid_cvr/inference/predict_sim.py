@@ -158,7 +158,17 @@ def predict_sim_parameter_maps(
         pred_sigma_cvr = prediction["sigma_cvr"].cpu().numpy().astype(np.float32)
         pred_sigma_delay = prediction["sigma_delay"].cpu().numpy().astype(np.float32)
         pred_sigma_T = prediction["sigma_T"].cpu().numpy().astype(np.float32)
-        eval_mask = prediction["coverage"].cpu().numpy().astype(bool)
+        eval_mask = prediction["coverage"].cpu().numpy().astype(bool) & support
+        for volume in (
+            pred_cvr,
+            pred_delay,
+            pred_T,
+            pred_sigma,
+            pred_sigma_cvr,
+            pred_sigma_delay,
+            pred_sigma_T,
+        ):
+            volume[~eval_mask] = 0.0
         processed_slices = len(dataset._valid_slice_indices(eval_mask, slice_axis))
         slice_rows.append(
             {
@@ -235,6 +245,18 @@ def predict_sim_parameter_maps(
             pred_sigma_T, ref_img, out / "predicted_T_uncertainty.nii.gz", nib
         ),
     }
+    for name, sigma, prediction in (
+        ("CVR", pred_sigma_cvr, pred_cvr),
+        ("delay", pred_sigma_delay, pred_delay),
+        ("T", pred_sigma_T, pred_T),
+    ):
+        percent = np.zeros_like(prediction, dtype=np.float32)
+        percent[eval_mask] = 100.0 * np.asarray(sigma)[eval_mask] / np.maximum(
+            np.abs(np.asarray(prediction)[eval_mask]), 1e-6
+        )
+        outputs[f"predicted_{name}_uncertainty_percent"] = _save_float_nifti(
+            percent, ref_img, out / f"predicted_{name}_uncertainty_percent.nii.gz", nib
+        )
     gt_error_outputs = _save_gt_error_uncertainty_maps(
         out, ref_img, maps, pred_cvr, pred_delay, pred_T, pred_sigma, eval_mask, nib
     )
@@ -580,6 +602,14 @@ def _write_error_qc_png(
     for row_idx, (name, gt, pred, sigma) in enumerate(rows):
         gt_array = np.asarray(gt, dtype=np.float32)
         pred_array = np.asarray(pred, dtype=np.float32)
+        if name == "CVR":
+            parameter_vmin, parameter_vmax = 0.0, 0.7
+        else:
+            joint_values = np.concatenate(
+                [gt_array[mask & np.isfinite(gt_array)], pred_array[mask & np.isfinite(pred_array)]]
+            )
+            parameter_vmin = min(0.0, float(np.min(joint_values)))
+            parameter_vmax = max(float(np.max(joint_values)), parameter_vmin + 1e-6)
         percent_error = 100.0 * np.abs(pred_array - gt_array) / np.maximum(np.abs(gt_array), 1e-6)
         percent_uncertainty = 100.0 * np.asarray(sigma, dtype=np.float32) / np.maximum(
             np.abs(pred_array), 1e-6
@@ -597,11 +627,13 @@ def _write_error_qc_png(
             shown_mask = _take_slice(mask, z, slice_axis).astype(bool)
             shown = np.ma.masked_where(~shown_mask, shown)
             cmap = "magma" if "%" in title else "viridis"
-            vmax = None
+            vmin = parameter_vmin
+            vmax = parameter_vmax
             if "%" in title:
                 finite = np.asarray(shown.compressed())
+                vmin = 0.0
                 vmax = max(float(np.percentile(finite, 99)), 1.0) if finite.size else 1.0
-            im = ax.imshow(np.flipud(np.rot90(shown)), cmap=cmap, vmin=0.0 if "%" in title else None, vmax=vmax)
+            im = ax.imshow(np.flipud(np.rot90(shown)), cmap=cmap, vmin=vmin, vmax=vmax)
             ax.set_title(f"{name} {title}")
             ax.axis("off")
             fig.colorbar(im, ax=ax, fraction=0.046)

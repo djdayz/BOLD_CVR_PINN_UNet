@@ -24,6 +24,32 @@ def test_cnn1d_unet3d_physiology_forward_with_direct_bounded_heads():
     assert torch.all((out["delay"] >= 0.0) & (out["delay"] <= 80.0))
     assert torch.all((out["T"] >= 2.0) & (out["T"] <= 100.0))
     assert set(out["parameter_log_var"]) == {"cvr", "delay", "T"}
+    assert out["cvr_profile"].shape == out["cvr"].shape
+    assert out["cvr_correction_gate"].shape == out["cvr"].shape
+    assert torch.all(out["cvr_correction_factor"] > 0)
+
+
+def test_cvr_residual_head_starts_at_physical_profile_and_receives_gradients():
+    model = CNN1DUNet3DPhysiologyModel(
+        in_channels=4,
+        base_channels=4,
+        depth=1,
+        temporal_embedding_channels=8,
+        cvr_residual_channels=8,
+        initial_parameter_values={"delay": 2.0, "T": 5.0},
+    )
+    out = model(
+        torch.randn(1, 4, 8, 8, 8),
+        etco2=torch.sin(torch.arange(16).float() / 3).unsqueeze(0),
+        time_grid=torch.arange(16).float(),
+        mask=torch.ones(1, 8, 8, 8),
+        bold_psc=torch.randn(1, 16, 8, 8, 8),
+    )
+    assert torch.allclose(out["cvr"], out["cvr_profile"], atol=1e-6)
+    out["bold_psc_hat"].square().mean().backward()
+    final = model.cvr_residual_head.net[-1]
+    assert final.weight.grad is not None
+    assert torch.isfinite(final.weight.grad).all()
 
 
 def test_temporal_hybrid_joint_head_uses_no_tissue_input():

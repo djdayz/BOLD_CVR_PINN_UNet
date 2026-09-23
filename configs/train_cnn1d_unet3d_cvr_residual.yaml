@@ -44,7 +44,7 @@ testing:
 
 model:
   name: SelfSupervisedCNN1D3DUNet
-  architecture: cnn1d_unet3d_physiology
+  architecture: cnn1d_hybrid_3d
   parameterization: direct
   in_channels: auto
   spatial_dims: 3
@@ -53,11 +53,13 @@ model:
   norm: instance
   dropout: 0.05
   temporal_embedding_channels: 48
-  temporal_voxel_chunk_size: 16384
+  # Stage 2 keeps two cross-paradigm graphs; smaller chunks prevent VRAM spikes
+  # without changing the full-volume input or temporal information.
+  temporal_voxel_chunk_size: 8192
   joint_parameter_head: true
   cvr_residual_head: true
   cvr_residual_channels: 24
-  # ln(2): the gated branch can initially learn up to a 0.5x-2x correction.
+  # ln(2): bounded gated multiplicative correction around profiled CVR.
   cvr_log_correction_limit: 0.6931471805599453
   # Broad physiological initialization only; not a GT target or training prior.
   initial_parameter_values: {delay: 25.0, T: 25.0}
@@ -101,10 +103,12 @@ training:
   persistent_workers: true
   prefetch_factor: 1
   use_amp: true
-  max_epochs: 700
+  cudnn_benchmark: true
+  allow_tf32: true
+  max_epochs: 600
   gradient_clip_norm: 1.0
-  save_every_epochs: 5
-  validate_every_epochs: 10
+  save_every_epochs: 10
+  validate_every_epochs: 20
   reset_optimizer_on_stage_boundary_resume: true
   resume_if_available: true
   resume_weights_only: false
@@ -129,7 +133,7 @@ stages:
     losses: {data: 1.0, view: 0.0, nuisance: 0.0, weak: 0.0, transition_alpha: 0.0}
 
   stage_2_mixed_all_conditions:
-    epochs: 500
+    epochs: 400
     lr: 0.0005
     tcnr_levels: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
     tcnr_probabilities: [0.05, 0.05, 0.15, 0.20, 0.20, 0.20, 0.15]
@@ -148,5 +152,5 @@ stages:
     losses: {data: 1.0, view: 0.05, nuisance: 0.0, weak: 0.0, transition_alpha: 0.0}
 
 checkpoint:
-  best_path: data/models/self_supervised_cnn1d_physiology/best.pt
+  best_path: data/models/self_supervised_cnn1d_cvr_residual_v1/best.pt
   selection_metric: label_free_composite
