@@ -109,11 +109,18 @@ def draw_map(
     vmin: float,
     vmax: float,
     cbar_label: str,
+    mask: np.ndarray | None = None,
     flip_vertical: bool = False,
 ):
+    shown = slice2d(data, axis, index, flip_vertical=flip_vertical)
+    if mask is not None:
+        shown_mask = slice2d(mask, axis, index, flip_vertical=flip_vertical).astype(bool)
+        shown = np.ma.masked_where(~shown_mask, shown)
+    display_cmap = plt.get_cmap(cmap).copy()
+    display_cmap.set_bad("white")
     im = ax.imshow(
-        slice2d(data, axis, index, flip_vertical=flip_vertical),
-        cmap=cmap,
+        shown,
+        cmap=display_cmap,
         vmin=vmin,
         vmax=vmax,
         origin="lower",
@@ -144,7 +151,15 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         args.real_cvr_root / subject / session / conventional_name
     )
     pinn_cvr, _ = load(session_dir / "predicted_CVR.nii.gz")
-    sigma, _ = load(session_dir / "predicted_uncertainty_sigma.nii.gz")
+    uncertainty_percent_path = session_dir / "predicted_CVR_uncertainty_percent.nii.gz"
+    if uncertainty_percent_path.exists():
+        sigma, _ = load(uncertainty_percent_path)
+        uncertainty_title = "CVR uncertainty (%)"
+        uncertainty_label = "% of predicted CVR"
+    else:
+        sigma, _ = load(session_dir / "predicted_uncertainty_sigma.nii.gz")
+        uncertainty_title = "Predicted uncertainty"
+        uncertainty_label = "sigma"
     residual, _ = load(session_dir / "residual_rms.nii.gz")
     recon_mean, _ = load(session_dir / "reconstructed_BOLD_PSC_mean.nii.gz")
 
@@ -166,7 +181,7 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         nib.save(out_img, str(session_dir / "observed_minus_reconstructed_BOLD_PSC_mean.nii.gz"))
 
     cvr_vmin, cvr_vmax = float(args.cvr_vmin), float(args.cvr_vmax)
-    sigma_vmin, sigma_vmax = robust_limits(sigma, mask, 1, 99)
+    sigma_vmin, sigma_vmax = (0.0, 100.0) if uncertainty_percent_path.exists() else robust_limits(sigma, mask, 1, 99)
     residual_vmin, residual_vmax = robust_limits(residual, mask, 1, 99)
     psc_vmin, psc_vmax = robust_limits(np.stack([observed_mean, recon_mean]), np.stack([mask, mask]), 2, 98)
     diff_vmin, diff_vmax = symmetric_limits(diff, mask, 98)
@@ -188,6 +203,7 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         vmin=cvr_vmin,
         vmax=cvr_vmax,
         cbar_label="%BOLD/mmHg",
+        mask=mask,
         flip_vertical=args.flip_vertical,
     )
     draw_map(
@@ -195,11 +211,12 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         pinn_cvr,
         axis,
         index,
-        title="PINN CVR",
+        title="Neural network CVR",
         cmap="viridis",
         vmin=cvr_vmin,
         vmax=cvr_vmax,
         cbar_label="%BOLD/mmHg",
+        mask=mask,
         flip_vertical=args.flip_vertical,
     )
     draw_map(
@@ -207,11 +224,12 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         sigma,
         axis,
         index,
-        title="Predicted uncertainty",
+        title=uncertainty_title,
         cmap="magma",
         vmin=sigma_vmin,
         vmax=sigma_vmax,
-        cbar_label="sigma",
+        cbar_label=uncertainty_label,
+        mask=mask,
         flip_vertical=args.flip_vertical,
     )
     draw_map(
@@ -224,6 +242,7 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         vmin=residual_vmin,
         vmax=residual_vmax,
         cbar_label="PSC",
+        mask=mask,
         flip_vertical=args.flip_vertical,
     )
     draw_map(
@@ -236,6 +255,7 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         vmin=psc_vmin,
         vmax=psc_vmax,
         cbar_label="PSC",
+        mask=mask,
         flip_vertical=args.flip_vertical,
     )
     draw_map(
@@ -248,6 +268,7 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         vmin=psc_vmin,
         vmax=psc_vmax,
         cbar_label="PSC",
+        mask=mask,
         flip_vertical=args.flip_vertical,
     )
     draw_map(
@@ -260,6 +281,7 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
         vmin=diff_vmin,
         vmax=diff_vmax,
         cbar_label="PSC",
+        mask=mask,
         flip_vertical=args.flip_vertical,
     )
     note_ax = fig.add_subplot(gs[1, 3])
@@ -275,14 +297,14 @@ def create_diagram(session_dir: Path, args: argparse.Namespace) -> Path:
     note_ax.text(
         0.02,
         0.56,
-        "Top row compares conventional CVR,\nPINN CVR, uncertainty, and residual.",
+        "Top row compares conventional CVR,\nneural network CVR, uncertainty, and residual.",
         fontsize=10,
         transform=note_ax.transAxes,
     )
     note_ax.text(
         0.02,
         0.34,
-        "Bottom row checks whether the PINN\nreconstruction matches observed BOLD PSC.",
+        "Bottom row checks whether the model\nreconstruction matches observed BOLD PSC.",
         fontsize=10,
         transform=note_ax.transAxes,
     )

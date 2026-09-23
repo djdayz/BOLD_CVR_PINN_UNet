@@ -64,6 +64,13 @@ def train_physiology_model(
     seed = int(config.get("dataset", {}).get("seed", 17))
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = bool(
+            config.get("training", {}).get("cudnn_benchmark", True)
+        )
+        allow_tf32 = bool(config.get("training", {}).get("allow_tf32", True))
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+        torch.backends.cudnn.allow_tf32 = allow_tf32
 
     batch_size = int(config.get("training", {}).get("batch_size", 2))
     training_cfg = config.get("training", {})
@@ -320,6 +327,7 @@ def _run_epoch(
     model.train(train)
     totals: dict[str, float] = {}
     count = 0
+    consecutive_nonfinite_steps = 0
     if optimizer is not None:
         optimizer.zero_grad(set_to_none=True)
     for batch_idx, batch in enumerate(loader):
@@ -366,9 +374,32 @@ def _run_epoch(
             should_step = ((batch_idx + 1) % int(gradient_accumulation_steps) == 0) or (batch_idx + 1 == len(loader))
             if should_step:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
-                scaler.step(optimizer)
-                scaler.update()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                if not torch.isfinite(grad_norm):
+                    bad = [
+                        name for name, parameter in model.named_parameters()
+                        if parameter.grad is not None and not torch.isfinite(parameter.grad).all()
+                    ]
+                    scale_before = scaler.get_scale()
+                    # GradScaler recorded the overflow during unscale_ and will
+                    # skip this optimizer step while reducing its scale.
+                    scaler.step(optimizer)
+                    scaler.update()
+                    consecutive_nonfinite_steps += 1
+                    totals["amp_skipped_steps"] = totals.get("amp_skipped_steps", 0.0) + 1.0
+                    if consecutive_nonfinite_steps >= 3:
+                        raise FloatingPointError(
+                            "Three consecutive non-finite optimizer steps: "
+                            + ", ".join(bad[:12])
+                            + f"; AMP scale {scale_before} -> {scaler.get_scale()}"
+                        )
+                else:
+                    scale_before = scaler.get_scale()
+                    scaler.step(optimizer)
+                    scaler.update()
+                    consecutive_nonfinite_steps = 0
+                    if scaler.get_scale() < scale_before:
+                        totals["amp_skipped_steps"] = totals.get("amp_skipped_steps", 0.0) + 1.0
                 optimizer.zero_grad(set_to_none=True)
         for key, value in loss_dict.items():
             totals[key] = totals.get(key, 0.0) + float(value.detach().cpu())
@@ -938,6 +969,11 @@ def _build_model(config: dict[str, Any], in_channels: int):
         parameterization=str(model_cfg.get("parameterization", "direct")),
         joint_parameter_head=bool(model_cfg.get("joint_parameter_head", False)),
         initial_parameter_values=dict(model_cfg.get("initial_parameter_values", {})),
+        cvr_residual_head=bool(model_cfg.get("cvr_residual_head", True)),
+        cvr_residual_channels=int(model_cfg.get("cvr_residual_channels", 24)),
+        cvr_log_correction_limit=float(
+            model_cfg.get("cvr_log_correction_limit", 0.6931471805599453)
+        ),
     )
 
 

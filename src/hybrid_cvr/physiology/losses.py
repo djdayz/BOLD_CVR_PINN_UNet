@@ -50,10 +50,11 @@ def _masked_weighted_mean(values, mask=None, weights=None):
 
 def student_t_reconstruction_loss(y_hat, y_obs, sigma, mask=None, weights=None, dof: float = 4.0):
     torch = __import__("torch")
-    scale = sigma.unsqueeze(1).clamp(0.03, 20.0)
-    z2 = ((y_obs - y_hat) / scale).square()
-    nll = torch.log(scale) + 0.5 * (float(dof) + 1.0) * torch.log1p(z2 / float(dof))
-    return _masked_weighted_mean(nll, mask, weights)
+    with torch.autocast(device_type=y_hat.device.type, enabled=False):
+        scale = sigma.float().unsqueeze(1).clamp(0.03, 20.0)
+        z2 = ((y_obs.float() - y_hat.float()) / scale).square()
+        nll = torch.log(scale) + 0.5 * (float(dof) + 1.0) * torch.log1p(z2 / float(dof))
+        return _masked_weighted_mean(nll, mask, weights)
 
 
 def consistency_loss(pred_a: dict, pred_b: dict, mask=None):

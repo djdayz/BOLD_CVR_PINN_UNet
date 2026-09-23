@@ -140,6 +140,7 @@ def make_plot(args: argparse.Namespace) -> None:
         rise_idx = int(np.argmin(np.abs(time - args.transition_time)))
     t_co2 = float(time[rise_idx])
     t_bold_start = min(float(time[-1]), t_co2 + roi_delay)
+    t_bold_start_display = min(float(time[-1]), t_co2 + max(roi_delay, 20.0))
     t_bold_late = min(float(time[-1]), t_bold_start + roi_t)
 
     pre_mask = (time >= max(float(time[0]), t_co2 - 45.0)) & (time < t_co2)
@@ -147,7 +148,12 @@ def make_plot(args: argparse.Namespace) -> None:
     y_start = bold_at(time, bold_roi, t_bold_start)
     y_late = bold_at(time, bold_roi, t_bold_late)
 
-    cvr_window = (time >= t_bold_start) & (time <= min(float(time[-1]), t_bold_start + max(4.0 * roi_t, 90.0)))
+    # Keep the amplitude annotation within the first hypercapnic response while
+    # allowing enough time to reach its true BOLD peak.
+    cvr_window = (
+        (time >= t_bold_start)
+        & (time <= min(float(time[-1]), t_bold_start + max(6.0 * roi_t, 150.0)))
+    )
     if np.any(cvr_window):
         cvr_indices = np.where(cvr_window)[0]
         amp_idx = int(cvr_indices[np.nanargmax(bold_roi[cvr_window])])
@@ -198,13 +204,13 @@ def make_plot(args: argparse.Namespace) -> None:
 
     for ax in (ax_top, ax_bottom):
         ax.axvline(t_co2, color="0.25", lw=1.2, ls=":", alpha=0.75)
-        ax.axvline(t_bold_start, color="0.25", lw=1.2, ls=":", alpha=0.75)
+        ax.axvline(t_bold_start_display, color="0.25", lw=1.2, ls=":", alpha=0.75)
 
     yrange = float(np.nanmax(bold_roi) - np.nanmin(bold_roi))
     y_delay = float(np.nanpercentile(bold_roi, 10) + 0.08 * yrange)
-    ax_bottom.hlines(y_delay, t_co2, t_bold_start, color="black", linewidth=4.0)
+    ax_bottom.hlines(y_delay, t_co2, t_bold_start_display, color="black", linewidth=4.0)
     ax_bottom.text(
-        (t_co2 + t_bold_start) / 2.0,
+        (t_co2 + t_bold_start_display) / 2.0,
         y_delay - 0.28,
         "Delay, τ",
         ha="center",
@@ -212,18 +218,26 @@ def make_plot(args: argparse.Namespace) -> None:
         fontweight="bold",
     )
 
-    y_t = float((y_arrow_low + y_arrow_high) / 2.0)
     arrowprops = dict(arrowstyle="<->", lw=2.8, color="black", shrinkA=0, shrinkB=0)
+    t_t_visual = min(300.0, float(time[-1]))
+    y_t_visual = bold_at(time, bold_roi, t_t_visual)
     ax_bottom.annotate(
         "",
-        xy=(t_bold_late, y_t),
-        xytext=(t_bold_start, y_t),
+        xy=(t_t_visual, y_t_visual),
+        xytext=(t_bold_start_display, y_t_visual),
         arrowprops=dict(arrowstyle="->", lw=2.6, color="black", shrinkA=0, shrinkB=0),
     )
+    ax_bottom.scatter(
+        [t_t_visual],
+        [y_t_visual],
+        s=22,
+        color="black",
+        zorder=5,
+    )
     ax_bottom.text(
-        (t_bold_start + t_bold_late) / 2.0,
-        y_t + 0.45,
-        "Response time, T",
+        (t_bold_start_display + t_t_visual) / 2.0,
+        y_t_visual + 0.35,
+        "Response time constant, T",
         ha="center",
         va="bottom",
         fontweight="bold",
@@ -238,24 +252,43 @@ def make_plot(args: argparse.Namespace) -> None:
     ax_bottom.text(
         t_amp + 8.0,
         (y_arrow_low + y_arrow_high) / 2.0,
-        "CVR magnitude",
+        "CVR = ΔBOLD / ΔETCO2",
+        ha="left",
+        va="center",
+        fontweight="bold",
+    )
+
+    etco2_at_amp = float(np.interp(t_amp, time, etco2))
+    baseline_at_amp = float(np.interp(t_amp, time, baseline))
+    ax_top.annotate(
+        "",
+        xy=(t_amp, etco2_at_amp),
+        xytext=(t_amp, baseline_at_amp),
+        arrowprops=dict(arrowstyle="<->", lw=2.2, color="black", shrinkA=0, shrinkB=0),
+    )
+    ax_top.text(
+        t_amp + 8.0,
+        (etco2_at_amp + baseline_at_amp) / 2.0,
+        "ΔETCO2",
         ha="left",
         va="center",
         fontweight="bold",
     )
 
     ax_top.set_title("sub-01_ses-01: full ETCO2 stimulus and cortical-GM BOLD response", fontsize=11)
-    ax_bottom.set_xlim(float(time[0]), float(time[-1]))
+    display_start = 100.0
+    ax_bottom.set_xlim(display_start, float(time[-1]))
     tick_step = 100.0
     tick_max = float(np.ceil(time[-1] / tick_step) * tick_step)
-    ax_bottom.set_xticks(np.arange(0.0, tick_max + 0.5 * tick_step, tick_step))
+    ax_bottom.set_xticks(np.arange(display_start, tick_max + 0.5 * tick_step, tick_step))
     ax_bottom.margins(x=0)
     fig.text(
         0.12,
         0.015,
         (
             f"cortical-GM ROI, slice {args.slice_index}, n={int(selected.sum())}; "
-            f"median CVR={roi_cvr:.3f} %/mmHg, delay={roi_delay:.1f} s, T={roi_t:.1f} s"
+            f"median CVR={roi_cvr:.3f} %/mmHg, delay={roi_delay:.1f} s, T={roi_t:.1f} s; "
+            "annotation spacing is schematic"
         ),
         ha="left",
         va="bottom",
@@ -293,8 +326,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--transition-time",
         type=float,
-        default=516.0,
-        help="CO2 transition time to annotate. Use none by editing/calling with omitted value only if automatic selection is desired.",
+        default=220.1,
+        help="CO2 transition time to annotate; defaults to the first sustained hypercapnia rise.",
     )
     return ap.parse_args()
 
