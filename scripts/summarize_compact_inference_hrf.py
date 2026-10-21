@@ -43,18 +43,24 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
 def qc(path: Path, neural: Path, hrf: Path) -> None:
     support = load(neural / "GT_CVR.nii.gz") > 0
     z = int(np.argmax(support.sum(axis=(0, 1))))
-    fig, axes = plt.subplots(3, 3, figsize=(8.3, 7.2), constrained_layout=True)
+    fig, axes = plt.subplots(
+        3,
+        3,
+        figsize=(7.3, 7.0),
+        gridspec_kw={"wspace": 0.015, "hspace": 0.09},
+    )
+    fig.subplots_adjust(left=0.07, right=0.91, top=0.94, bottom=0.02)
     for row, (_, gt_name, pred_name, hrf_name, limits, label) in enumerate(PARAMETERS):
         arrays = (load(neural / gt_name), load(neural / pred_name), load(hrf / hrf_name))
         for col, (array, title) in enumerate(zip(arrays, ("Ground truth", "Self-supervised", "Exponential HRF"), strict=True)):
-            shown_mask = np.flipud(np.rot90(support[:, :, z]))
-            shown = np.ma.masked_where(~shown_mask, np.flipud(np.rot90(array[:, :, z])))
+            shown_mask = np.rot90(support[:, :, z])
+            shown = np.ma.masked_where(~shown_mask, np.rot90(array[:, :, z]))
             image = axes[row, col].imshow(shown, cmap="viridis", vmin=limits[0], vmax=limits[1])
             axes[row, col].axis("off")
             if row == 0: axes[row, col].set_title(title, fontsize=10, fontweight="bold")
         axes[row, 0].text(-0.07, 0.5, label, rotation=90, transform=axes[row, 0].transAxes,
                           ha="right", va="center", fontsize=10, fontweight="bold")
-        fig.colorbar(image, ax=axes[row, :], fraction=0.025, pad=0.01)
+        fig.colorbar(image, ax=axes[row, :], fraction=0.022, pad=0.008)
     fig.savefig(path, dpi=180, bbox_inches="tight"); plt.close(fig)
 
 

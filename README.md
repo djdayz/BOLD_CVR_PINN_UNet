@@ -1,8 +1,9 @@
 # Self-Supervised CVR Physiology Model
 
 Research code for unsupervised/self-supervised BOLD-MRI cerebrovascular
-reactivity (CVR) mapping with a self-supervised 1D-CNN + 3D-U-Net physiology model and a differentiable
-first-order ODE forward model.
+reactivity (CVR) mapping with a self-supervised voxelwise 1D-CNN, full-volume
+3D U-Net, amplitude-preserving CVR refinement, and differentiable first-order
+ODE forward model.
 
 The project estimates voxelwise:
 
@@ -31,11 +32,13 @@ where:
 - `T_v` is the response time constant
 
 The non-causal 1D CNN and 3D U-Net predict voxelwise delay and `T`. Given those
-timing maps, CVR is profiled differentiably from raw BOLD PSC and delta-ETCO2
-amplitudes after removing intercept and linear drift. The differentiable ODE
-solver then reconstructs BOLD PSC. Training is strictly self-supervised and uses
-robust Student-t reconstruction likelihood plus cross-paradigm consistency in
-the mixed-condition stage.
+timing maps, an initial CVR profile is fitted differentiably from raw BOLD PSC
+and delta-ETCO2 amplitudes after removing intercept and linear drift. A compact
+gated residual head can refine that physical CVR profile using learned temporal,
+spatial, and physical-amplitude features. The differentiable ODE solver then
+reconstructs BOLD PSC. Training is strictly self-supervised and uses robust
+Student-t reconstruction likelihood plus cross-paradigm consistency in the
+mixed-condition stage.
 There is no supervised GT parameter loss, tissue-distribution target, or spatial
 smoothness loss.
 
@@ -51,7 +54,7 @@ configs/
   segmentation.yaml
   real_cvr_fit.yaml
   simulation.yaml
-  train_cnn1d_unet3d_physiology.yaml
+  train_cnn1d_unet3d_cvr_residual.yaml   current model
 
 src/hybrid_cvr/
   preprocessing/      BOLD motion correction, PSC conversion, gas processing
@@ -66,10 +69,12 @@ src/hybrid_cvr/
   visualisation/      QC plots and map summaries
 
 scripts/
-  run_checkpoint_grid_chunked.sh
-  summarize_self_supervised_grid.py
+  run_presentation_evaluation.sh
   evaluate_hrf_sim_condition.py
-  summarize_hrf_sim_grid.py
+  summarize_compact_inference_hrf.py
+  plot_compact_metric_heatmaps.py
+  plot_cvr_all_metric_heatmaps.py
+  plot_test_cvr_neural_vs_hrf_heatmap.py
 ```
 
 Large data, trained checkpoints, synthetic images, and inference outputs are
@@ -203,7 +208,7 @@ hybrid-cvr generate-mida-parameter-maps \
   --config configs/simulation.yaml
 
 hybrid-cvr prepare-case-index \
-  --config configs/train_cnn1d_unet3d_physiology.yaml
+  --config configs/train_cnn1d_unet3d_cvr_residual.yaml
 ```
 
 Generate synthetic BOLD QC examples:
@@ -218,24 +223,24 @@ Train the current full-volume self-supervised physiology model:
 
 ```bash
 hybrid-cvr train \
-  --config configs/train_cnn1d_unet3d_physiology.yaml \
+  --config configs/train_cnn1d_unet3d_cvr_residual.yaml \
   --sim-root data/simulated \
-  --out data/models/self_supervised_cnn1d_profiled_cvr_v1
+  --out data/models/self_supervised_cnn1d_cvr_residual_v1
 ```
 
 Export one synthetic prediction or run real inference:
 
 ```bash
 hybrid-cvr predict-sim \
-  --checkpoint data/models/self_supervised_cnn1d_profiled_cvr_v1/best.pt \
-  --config configs/train_cnn1d_unet3d_physiology.yaml \
+  --checkpoint data/models/self_supervised_cnn1d_cvr_residual_v1/stage_2_mixed_all_conditions_best.pt \
+  --config configs/train_cnn1d_unet3d_cvr_residual.yaml \
   --sim-root data/simulated \
-  --split test --case-id case_086 --paradigm block --tcnr 10 \
+  --split test --case-id case_085 --paradigm block --tcnr 10 \
   --out data/evaluation/example_prediction
 
 hybrid-cvr infer-real \
-  --checkpoint data/models/self_supervised_cnn1d_profiled_cvr_v1/best.pt \
-  --config configs/train_cnn1d_unet3d_physiology.yaml \
+  --checkpoint data/models/self_supervised_cnn1d_cvr_residual_v1/stage_2_mixed_all_conditions_best.pt \
+  --config configs/train_cnn1d_unet3d_cvr_residual.yaml \
   --subject sub-01 \
   --session ses-01 \
   --processed-root data/processed \
@@ -357,16 +362,18 @@ parameter distributions are not model inputs or training targets.
 
 The non-causal voxelwise 1D CNN processes the complete normalized BOLD/ETCO2
 history to represent timing and response shape. A full-volume 3D U-Net combines
-those temporal embeddings with observable spatial features and predicts
-voxelwise delay and `T`. CVR is not a free neural-network output: after delay and
-`T` are predicted, a unit-CVR ODE response is generated and CVR is fitted from
-the raw BOLD PSC and delta-ETCO2 amplitudes by differentiable least squares.
-Only intercept and linear drift are removed during this amplitude fit.
+the 48-channel temporal embedding with 10 observable spatial channels. The
+joint head predicts voxelwise delay, `T`, parameter log-variances, and the BOLD
+noise scale. After delay and `T` are predicted, a unit-CVR ODE response is
+generated and an initial CVR map is fitted from raw BOLD PSC and delta-ETCO2 by
+differentiable least squares. A bounded gated residual head refines CVR while
+remaining anchored to this physical amplitude estimate. Only intercept and
+linear drift are profiled as nuisance terms.
 
 The current config is:
 
 ```text
-configs/train_cnn1d_unet3d_physiology.yaml
+configs/train_cnn1d_unet3d_cvr_residual.yaml
 ```
 
 Key settings:
@@ -376,19 +383,19 @@ spatial input: complete 94 x 94 x 50 volume at approximately 2.5 mm
 temporal input: complete 480-point BOLD PSC + ETCO2 + time
 temporal encoder: non-causal dilated 1D CNN, 48-channel voxel embedding
 spatial model: 3D U-Net, 24 base channels, depth 2
-predicted parameters: voxelwise delay and T
-profiled parameter: voxelwise CVR from raw physical amplitudes
+predicted parameters: voxelwise CVR, delay, T, and uncertainty
+CVR: differentiable physical profile plus bounded gated residual refinement
 split fractions: 70% train, 15% validation, 15% test
 samples per epoch: 8
 batch size: 1 full volume, gradient accumulation: 4
-epochs: 700
+epochs: 600
 stage 1: 200 epochs, clean tCNR 2/5/10, balanced paradigms, LR 1e-3
-stage 2: 500 epochs, all tCNR/paradigm conditions, LR 5e-4
+stage 2: 400 epochs, all tCNR/paradigm conditions, LR 5e-4
 stage 2 low-tCNR probabilities: 0.05 each for tCNR 0.1 and 0.2
 stage 2 loss: reconstruction + 0.05 cross-paradigm consistency
 learning rate scheduler: none
-validation: 21 fixed samples every 10 epochs
-checkpoint metric: lowest self-supervised validation total
+validation: 21 fixed samples every 20 epochs
+checkpoint metric: label-free self-supervised validation composite
 ```
 
 The reconstruction objective is a robust Student-t negative log-likelihood.
@@ -403,7 +410,7 @@ selection.
 The current training run writes:
 
 ```text
-data/models/self_supervised_cnn1d_profiled_cvr_v1/
+data/models/self_supervised_cnn1d_cvr_residual_v1/
   best.pt
   last.pt
   stage_1_identifiable_clean_best.pt
@@ -412,20 +419,28 @@ data/models/self_supervised_cnn1d_profiled_cvr_v1/
   logs/
 ```
 
-`best.pt` is updated only on validation epochs when the label-free validation
-total improves. Validation is intentionally skipped on other epochs; `nan` in
-those validation log fields means "not evaluated", not a numerical model
-failure.
+Checkpoints are selected using label-free self-supervised validation quantities,
+not GT parameter metrics. The reported compact evaluation uses
+`stage_2_mixed_all_conditions_best.pt`. Validation is intentionally skipped on
+non-validation epochs; `nan` in those log fields means "not evaluated", not a
+numerical model failure.
 
-Real-subject inference outputs are written under
-`data/derivatives/real_inference/<subject>/<session>/`.
+Real-subject inference outputs are written to the directory passed with `--out`.
+The compact evaluation stores them under
+`data/models/self_supervised_cnn1d_cvr_residual_v1/presentation_evaluation/real/`.
 
 Each real inference folder contains:
 
 ```text
 predicted_CVR.nii.gz
+predicted_CVR_uncertainty.nii.gz
+predicted_CVR_uncertainty_percent.nii.gz
 predicted_delay.nii.gz
+predicted_delay_uncertainty.nii.gz
+predicted_delay_uncertainty_percent.nii.gz
 predicted_T.nii.gz
+predicted_T_uncertainty.nii.gz
+predicted_T_uncertainty_percent.nii.gz
 predicted_uncertainty_sigma.nii.gz
 reconstructed_BOLD_PSC_mean.nii.gz
 residual_rms.nii.gz
@@ -439,7 +454,7 @@ slice_summary.csv
 Open a real-subject QC report:
 
 ```bash
-open data/derivatives/real_inference/sub-01/ses-01/real_inference_qc_report.png
+open data/models/self_supervised_cnn1d_cvr_residual_v1/presentation_evaluation/real/sub-01/ses-01/real_inference_qc_report.png
 ```
 
 View real inference maps in FSLeyes:
@@ -447,21 +462,58 @@ View real inference maps in FSLeyes:
 ```bash
 fsleyes \
   data/processed/sub-01/ses-01/mean_bold.nii.gz \
-  data/derivatives/real_inference/sub-01/ses-01/predicted_CVR.nii.gz \
-  data/derivatives/real_inference/sub-01/ses-01/predicted_delay.nii.gz \
-  data/derivatives/real_inference/sub-01/ses-01/predicted_T.nii.gz \
-  data/derivatives/real_inference/sub-01/ses-01/predicted_uncertainty_sigma.nii.gz
+  data/models/self_supervised_cnn1d_cvr_residual_v1/presentation_evaluation/real/sub-01/ses-01/predicted_CVR.nii.gz \
+  data/models/self_supervised_cnn1d_cvr_residual_v1/presentation_evaluation/real/sub-01/ses-01/predicted_delay.nii.gz \
+  data/models/self_supervised_cnn1d_cvr_residual_v1/presentation_evaluation/real/sub-01/ses-01/predicted_T.nii.gz \
+  data/models/self_supervised_cnn1d_cvr_residual_v1/presentation_evaluation/real/sub-01/ses-01/predicted_CVR_uncertainty_percent.nii.gz
 ```
 
 Open synthetic prediction QC:
 
 ```bash
-open data/evaluation/current/test/case_086/pseudo_random_binary/tcnr_10.0/predicted_maps_qc.png
+open data/models/self_supervised_cnn1d_cvr_residual_v1/presentation_evaluation/summary/comparison_qc/test_pseudo_random_binary_tcnr_10.0.png
 ```
 
 GT-error maps exist only for held-out synthetic validation/test outputs. For real
-subjects, use `predicted_uncertainty_sigma.nii.gz` and `residual_rms.nii.gz` as
-QC indicators because real GT parameter maps do not exist.
+subjects, use the parameter-specific uncertainty maps, percentage uncertainty
+maps, and `residual_rms.nii.gz` as QC indicators because real GT parameter maps
+do not exist. Percentage uncertainty is relative model uncertainty, not actual
+percentage error.
+
+All saved prediction, uncertainty, reconstruction, and residual maps are
+explicitly zeroed outside the relevant brain mask before NIfTI export.
+
+## Current Evaluation Results
+
+The compact final evaluation uses one fixed validation parameter-map case
+(`case_070`) and one fixed test case (`case_085`) across three ETCO2 paradigms
+and seven tCNR levels, for 21 conditions per split. It compares the Stage 2
+self-supervised checkpoint against voxelwise exponential ODE-HRF fitting.
+
+Mean performance across the 21 conditions in each split:
+
+| Split | Method | CVR MAE | CVR r | Delay MAE (s) | Delay r | T MAE (s) | T r |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Validation | Self-supervised | 0.0243 | 0.964 | 2.28 | 0.751 | 5.02 | 0.704 |
+| Validation | Exponential ODE-HRF | 0.0383 | 0.896 | 12.77 | 0.628 | 15.41 | 0.491 |
+| Test | Self-supervised | 0.0319 | 0.961 | 2.28 | 0.748 | 5.04 | 0.704 |
+| Test | Exponential ODE-HRF | 0.0410 | 0.919 | 9.00 | 0.575 | 14.89 | 0.509 |
+
+These values are preliminary condition-wise results, not population-level
+confidence estimates. The complete metric exports are:
+
+```text
+data/vm_outputs/self_supervised_cnn1d_cvr_residual_v1_presentation_evaluation/
+  summary/case_condition_metrics.csv
+  summary/aggregate_metrics.csv
+  summary/comparison_qc/
+```
+
+`case_condition_metrics.csv` contains MAE, relative MAE, bias, RMSE, and
+Pearson correlation for CVR, delay, and `T`, indexed by split, paradigm, tCNR,
+and method. Neural-only model inference averaged approximately 1.26 seconds per
+synthetic full volume on the evaluation GPU, excluding on-the-fly simulation.
+The `sub-01/ses-01` full-volume real inference took approximately 13 seconds.
 
 ## Git Hygiene
 
@@ -502,4 +554,20 @@ complete 3D volume and time series, but spatial context and noise-robust
 optimization can still soften fine boundaries. Profiled CVR depends on accurate
 delay/`T`, BOLD PSC scaling, and ETCO2 amplitude calibration. Uncertainty maps
 are research QC indicators, not clinical confidence scores. Independent
-validation is required before any scientific claim is treated as robust.
+validation is required before any scientific claim is treated as robust. The
+current compact evaluation includes only one held-out parameter-map case per
+split, so its 21 condition-level results do not represent 21 independent
+anatomical subjects.
+
+## Future Work
+
+- Evaluate every held-out parameter-map case and report case-level confidence
+  intervals, rather than relying on one compact validation and test case.
+- Calibrate predicted uncertainty against empirical parameter error.
+- Quantify repeatability across real sessions and compare against conventional
+  GLM and ODE-HRF maps using tissue-wise and whole-brain analyses.
+- Improve synthetic-to-real transfer with more realistic motion,
+  physiological-noise, scanner, and ETCO2 measurement models.
+- Test external scanners, acquisition protocols, and independent cohorts.
+- Investigate stimulus designs that better separate vascular delay from the
+  response time constant `T`.

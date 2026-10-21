@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Draw the current self-supervised 1D-CNN/3D-U-Net CVR architecture."""
+"""Draw a concise presentation diagram of the current CVR architecture."""
 
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Polygon
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,211 +12,184 @@ OUT_DIR = ROOT / "data" / "figures" / "presentation"
 
 COLORS = {
     "ink": "#17212B",
-    "muted": "#52616B",
     "input": "#EAF2F8",
     "input_edge": "#4F7D95",
-    "train": "#DDF3EE",
-    "train_edge": "#16806A",
-    "physics": "#FFF1D6",
-    "physics_edge": "#C27716",
+    "model": "#DDF3EE",
+    "model_edge": "#16806A",
     "output": "#FCE5E5",
     "output_edge": "#B74B4B",
+    "physics": "#FFF1D6",
+    "physics_edge": "#C27716",
     "loss": "#F1EAF7",
     "loss_edge": "#76528D",
-    "white": "#FFFFFF",
 }
 
 
-def box(ax, x, y, w, h, face, edge, title, lines=(), title_size=13, text_size=10.5):
+def box(ax, x, y, w, h, face, edge, title, body, *, title_size=14, body_size=11.5):
     patch = FancyBboxPatch(
         (x, y), w, h,
         boxstyle="round,pad=0.008,rounding_size=0.012",
-        linewidth=1.8, edgecolor=edge, facecolor=face,
+        linewidth=2.0, edgecolor=edge, facecolor=face, zorder=2,
     )
     ax.add_patch(patch)
-    ax.text(x + w / 2, y + h - 0.045, title, ha="center", va="top",
-            fontsize=title_size, fontweight="bold", color=COLORS["ink"])
-    if lines:
-        ax.text(x + w / 2, y + h * 0.37, "\n".join(lines), ha="center", va="center",
-                fontsize=text_size, color=COLORS["ink"], linespacing=1.38)
-    return patch
+    ax.text(
+        x + w / 2, y + h - 0.045, title,
+        ha="center", va="top", fontsize=title_size,
+        fontweight="bold", color=COLORS["ink"], zorder=3,
+    )
+    ax.text(
+        x + w / 2, y + h * 0.40, body,
+        ha="center", va="center", fontsize=body_size,
+        color=COLORS["ink"], linespacing=1.45, zorder=3,
+    )
 
 
-def arrow(ax, start, end, color=None, width=2.5, head=18, zorder=6):
+def arrow(ax, start, end, *, color=None, width=2.8, head=18):
     ax.add_patch(FancyArrowPatch(
         start, end, arrowstyle="-|>", mutation_scale=head,
         linewidth=width, color=color or COLORS["ink"],
-        connectionstyle="arc3,rad=0", shrinkA=0, shrinkB=0, zorder=zorder,
+        connectionstyle="arc3,rad=0", shrinkA=0, shrinkB=0, zorder=5,
     ))
 
 
-def line(ax, start, end, color=None, width=1.7, style="-"):
-    ax.plot([start[0], end[0]], [start[1], end[1]], style,
-            color=color or COLORS["ink"], linewidth=width, solid_capstyle="round")
+def line(ax, start, end, *, color=None, width=2.0):
+    ax.plot(
+        [start[0], end[0]], [start[1], end[1]],
+        color=color or COLORS["ink"], linewidth=width,
+        solid_capstyle="round", zorder=4,
+    )
 
 
-def draw_unet(ax, x, y, w, h):
-    box(ax, x, y, w, h, COLORS["train"], COLORS["train_edge"], "Full-volume 3D U-Net", ())
-    ax.text(x + w / 2, y + h - 0.095, "joint spatial representation", ha="center",
-            va="top", fontsize=10.5, color=COLORS["muted"])
-
+def draw_mini_unet(ax, x, y, w, h):
     centers = [
-        (x + 0.12 * w, y + 0.58 * h),
-        (x + 0.31 * w, y + 0.40 * h),
-        (x + 0.50 * w, y + 0.24 * h),
-        (x + 0.69 * w, y + 0.40 * h),
-        (x + 0.88 * w, y + 0.58 * h),
+        (x + 0.13 * w, y + 0.48 * h),
+        (x + 0.31 * w, y + 0.32 * h),
+        (x + 0.50 * w, y + 0.18 * h),
+        (x + 0.69 * w, y + 0.32 * h),
+        (x + 0.87 * w, y + 0.48 * h),
     ]
-    labels = ["24", "48", "96", "48", "24"]
-    sizes = [(0.11, 0.16), (0.10, 0.14), (0.10, 0.13), (0.10, 0.14), (0.11, 0.16)]
-    patches = []
-    for (cx, cy), label, (rw, rh) in zip(centers, labels, sizes, strict=True):
-        p = FancyBboxPatch(
-            (cx - rw * w / 2, cy - rh * h / 2), rw * w, rh * h,
-            boxstyle="round,pad=0.004,rounding_size=0.006",
-            facecolor=COLORS["white"], edgecolor=COLORS["train_edge"], linewidth=1.35,
+    labels = ("24", "48", "96", "48", "24")
+    node_w, node_h = 0.14 * w, 0.20 * h
+    for center, label in zip(centers, labels, strict=True):
+        node = FancyBboxPatch(
+            (center[0] - node_w / 2, center[1] - node_h / 2),
+            node_w,
+            node_h,
+            boxstyle="round,pad=0.002,rounding_size=0.003",
+            facecolor="white",
+            edgecolor=COLORS["model_edge"],
+            linewidth=1.2,
+            zorder=3,
         )
-        ax.add_patch(p)
-        ax.text(cx, cy, label, ha="center", va="center", fontsize=10.5,
-                fontweight="bold", color=COLORS["ink"])
-        patches.append((cx, cy, rw * w, rh * h))
-    for left, right in zip(patches[:-1], patches[1:], strict=True):
-        arrow(ax, (left[0] + left[2] / 2, left[1]), (right[0] - right[2] / 2, right[1]),
-              color=COLORS["train_edge"], width=1.35, head=10)
-    # Straight skip connections.
-    y_skip_1 = y + 0.72 * h
-    line(ax, (centers[0][0], centers[0][1] + 0.08 * h), (centers[0][0], y_skip_1), COLORS["train_edge"], 1.2)
-    line(ax, (centers[0][0], y_skip_1), (centers[4][0], y_skip_1), COLORS["train_edge"], 1.2)
-    arrow(ax, (centers[4][0], y_skip_1), (centers[4][0], centers[4][1] + 0.08 * h), COLORS["train_edge"], 1.2, 9)
-    y_skip_2 = y + 0.59 * h
-    line(ax, (centers[1][0], centers[1][1] + 0.07 * h), (centers[1][0], y_skip_2), COLORS["train_edge"], 1.2)
-    line(ax, (centers[1][0], y_skip_2), (centers[3][0], y_skip_2), COLORS["train_edge"], 1.2)
-    arrow(ax, (centers[3][0], y_skip_2), (centers[3][0], centers[3][1] + 0.07 * h), COLORS["train_edge"], 1.2, 9)
-    ax.text(x + w / 2, y + 0.025, "Conv3D + IN3D + SiLU   |   MaxPool / transposed Conv",
-            ha="center", va="bottom", fontsize=7.6, color=COLORS["muted"])
+        ax.add_patch(node)
+        ax.text(center[0], center[1], label, ha="center", va="center", fontsize=7.5,
+                fontweight="bold", color=COLORS["ink"], zorder=4)
+    for left, right in zip(centers[:-1], centers[1:], strict=True):
+        arrow(
+            ax,
+            (left[0] + node_w / 2, left[1]),
+            (right[0] - node_w / 2, right[1]),
+            color=COLORS["model_edge"],
+            width=1.0,
+            head=7,
+        )
+    skip_y = y + 0.67 * h
+    line(ax, (centers[0][0], centers[0][1] + node_h / 2), (centers[0][0], skip_y),
+         color=COLORS["model_edge"], width=0.9)
+    line(ax, (centers[0][0], skip_y), (centers[4][0], skip_y),
+         color=COLORS["model_edge"], width=0.9)
+    arrow(ax, (centers[4][0], skip_y), (centers[4][0], centers[4][1] + node_h / 2),
+          color=COLORS["model_edge"], width=0.9, head=6)
+    ax.text(x + w / 2, y + 0.82 * h, "encoder   •   bottleneck   •   decoder",
+            ha="center", va="center", fontsize=7.3, color=COLORS["ink"])
 
 
-def main():
+def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(18, 10), facecolor="white")
+    fig, ax = plt.subplots(figsize=(18, 8), facecolor="white")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
 
-    # Input branch.
-    box(ax, 0.025, 0.665, 0.155, 0.19, COLORS["input"], COLORS["input_edge"], "", ())
+    y, h = 0.56, 0.29
+    boxes = [
+        (0.025, 0.145, COLORS["input"], COLORS["input_edge"], "Observable inputs",
+         "4D BOLD PSC\nMeasured ETCO$_2$\nBOLD summary maps"),
+        (0.215, 0.145, COLORS["model"], COLORS["model_edge"], "Temporal encoder",
+         "Voxelwise 1D CNN\nLearns BOLD–CO$_2$\ndynamics"),
+        (0.405, 0.155, COLORS["model"], COLORS["model_edge"], "Spatial model",
+         ""),
+        (0.605, 0.155, COLORS["output"], COLORS["output_edge"], "Parameter maps",
+         r"$\widehat{\mathrm{CVR}}$   $\hat{\tau}$   $\hat{T}$" "\nUncertainty maps"),
+        (0.805, 0.165, COLORS["physics"], COLORS["physics_edge"], "Physiological model",
+         ""),
+    ]
+    for x, w, face, edge, title, body in boxes:
+        box(ax, x, y, w, h, face, edge, title, body)
+
+    ax.text(0.4825, y + 0.205, "Full-volume 3D U-Net", ha="center", va="center",
+            fontsize=10.5, color=COLORS["ink"])
+    draw_mini_unet(ax, 0.412, y + 0.025, 0.141, 0.16)
+
     ax.text(
-        0.1025, 0.76,
-        "4D BOLD PSC\n$\\mathbf{[B,480,94,94,50]}$\nMeasured $\\mathbf{\\Delta ETCO_2}$\ntime + valid mask",
-        ha="center", va="center", fontsize=10.7, fontweight="bold",
-        color=COLORS["ink"], linespacing=1.42,
+        0.8875,
+        y + 0.155,
+        r"$\frac{d\hat y}{dt}=\frac{\widehat{\mathrm{CVR}}\,u(t-\hat\tau)-\hat y}{\hat T}$",
+        ha="center",
+        va="center",
+        fontsize=17.5,
+        color=COLORS["ink"],
     )
-    box(ax, 0.025, 0.43, 0.155, 0.17, COLORS["input"], COLORS["input_edge"],
-        "Observable maps",
-        ("10 spatial channels", "BOLD summaries, tCNR,", "mask, CO2 response features"), text_size=10.0)
+    ax.text(0.8875, y + 0.075, "Reconstructed BOLD PSC", ha="center", va="center",
+            fontsize=11.5, color=COLORS["ink"])
 
-    box(ax, 0.215, 0.645, 0.205, 0.23, COLORS["train"], COLORS["train_edge"],
-        "Voxelwise 1D CNN",
-        ("5 time-series inputs per voxel", "Conv1D: 5 -> 48, kernel 5", "6 residual dilated blocks", "d = 1, 2, 4, 8, 16, 32", "global average pooling"),
-        text_size=9.7)
-    ax.text(0.3175, 0.63, "shared, non-causal encoder -> 48 features / voxel",
-            ha="center", va="top", fontsize=9.2, color=COLORS["muted"])
-    arrow(ax, (0.18, 0.76), (0.215, 0.76))
+    for left, right in zip(boxes[:-1], boxes[1:], strict=True):
+        arrow(ax, (left[0] + left[1], y + h / 2), (right[0], y + h / 2))
 
-    # Concatenation node.
-    diamond = Polygon([(0.445, 0.62), (0.468, 0.66), (0.491, 0.62), (0.468, 0.58)],
-                      closed=True, facecolor=COLORS["white"], edgecolor=COLORS["train_edge"], linewidth=1.8)
-    ax.add_patch(diamond)
-    ax.text(0.468, 0.62, "+", ha="center", va="center", fontsize=18,
-            fontweight="bold", color=COLORS["train_edge"])
-    ax.text(0.468, 0.555, "concatenate\n58 channels", ha="center", va="top",
-            fontsize=9.5, color=COLORS["muted"])
-    arrow(ax, (0.42, 0.76), (0.468, 0.66))
-    line(ax, (0.18, 0.515), (0.468, 0.515), COLORS["ink"], 1.8)
-    arrow(ax, (0.468, 0.515), (0.468, 0.58))
-
-    draw_unet(ax, 0.515, 0.57, 0.285, 0.31)
-    arrow(ax, (0.491, 0.62), (0.515, 0.62))
-
-    box(ax, 0.835, 0.62, 0.14, 0.235, COLORS["train"], COLORS["train_edge"],
-        "Joint 3D head",
-        ("3x3x3 Conv", "InstanceNorm3D + SiLU", "1x1x1 Conv -> 6", "", r"$\hat{\tau}: 0-80\,s$", r"$\hat{T}: 2-100\,s$", "log-variances + noise scale"),
-        text_size=9.1)
-    arrow(ax, (0.80, 0.72), (0.835, 0.72))
-
-    # Differentiable physiology and amplitude-preserving CVR branch.
-    box(ax, 0.205, 0.245, 0.205, 0.19, COLORS["physics"], COLORS["physics_edge"],
-        "Differentiable first-order physiology",
-        (), title_size=9.8)
-    ax.text(0.3075, 0.335, r"$\frac{dx(t)}{dt}=\frac{u(t-\hat{\tau})-x(t)}{\hat{T}}$",
-            ha="center", va="center", fontsize=17.0, color=COLORS["ink"])
-    ax.text(0.3075, 0.278, "unit-CVR response x(t)",
-            ha="center", va="center", fontsize=11.5, color=COLORS["ink"])
-    arrow(ax, (0.905, 0.62), (0.905, 0.485), COLORS["physics_edge"])
-    line(ax, (0.905, 0.485), (0.3075, 0.485), COLORS["physics_edge"], 2.2)
-    arrow(ax, (0.3075, 0.485), (0.3075, 0.435), COLORS["physics_edge"])
-    line(ax, (0.1025, 0.665), (0.1025, 0.34), COLORS["input_edge"], 1.5)
-    arrow(ax, (0.1025, 0.34), (0.205, 0.34), COLORS["input_edge"], 2.2)
-    ax.text(0.155, 0.352, r"raw PSC + $\Delta$ETCO$_2$", ha="center", va="bottom",
-            fontsize=8.8, color=COLORS["input_edge"])
-
-    box(ax, 0.435, 0.245, 0.17, 0.19, COLORS["physics"], COLORS["physics_edge"],
-        "Physical CVR profile",
-        ("raw physical amplitudes", r"$\mathrm{CVR}_{p}=\frac{\langle x',y'\rangle}{\langle x',x'\rangle}$",
-         "CVR, covariance and RMS maps"),
-        title_size=10.3, text_size=11.8)
-    arrow(ax, (0.410, 0.34), (0.435, 0.34), COLORS["physics_edge"])
-
-    box(ax, 0.63, 0.245, 0.17, 0.19, COLORS["train"], COLORS["train_edge"],
-        "Gated residual CVR head",
-        ("1x1x1 + 3x3x3 + 1x1x1 Conv", "no pooling or normalization",
-         r"$\widehat{\mathrm{CVR}}=\mathrm{CVR}_{p}$",
-         r"$\times\exp[\ln(2)\,g\tanh(\Delta)]$"),
-        title_size=9.7, text_size=9.3)
-    arrow(ax, (0.605, 0.34), (0.63, 0.34), COLORS["train_edge"])
-    # Shared spatial and temporal features also enter the residual CVR head.
-    line(ax, (0.70, 0.57), (0.70, 0.455), COLORS["train_edge"], 2.0)
-    arrow(ax, (0.70, 0.455), (0.70, 0.435), COLORS["train_edge"])
-    ax.text(0.707, 0.46, "shared 3D + temporal features", ha="left", va="bottom",
-            fontsize=8.3, color=COLORS["train_edge"])
-
-    box(ax, 0.825, 0.245, 0.15, 0.19, COLORS["output"], COLORS["output_edge"],
-        "Outputs and reconstruction",
-        (r"$\widehat{\mathrm{CVR}},\ \hat{\tau},\ \hat{T}$", "parameter uncertainty maps", r"$\hat{y}(t)=\widehat{\mathrm{CVR}}\,x(t)+a+bt$", "reconstructed BOLD PSC"),
-        title_size=9.5, text_size=8.9)
-    arrow(ax, (0.80, 0.34), (0.825, 0.34), COLORS["output_edge"])
-
-    # Loss and optimization.
-    box(ax, 0.15, 0.035, 0.70, 0.145, COLORS["loss"], COLORS["loss_edge"],
-        "", ())
-    ax.text(0.50, 0.151, "Loss function", ha="center", va="center",
-            fontsize=12.5, fontweight="bold", color=COLORS["ink"])
-    ax.text(
-        0.50, 0.112,
+    loss_x, loss_y, loss_w, loss_h = 0.60, 0.13, 0.365, 0.22
+    box(
+        ax, loss_x, loss_y, loss_w, loss_h,
+        COLORS["loss"], COLORS["loss_edge"], "Self-supervised loss",
         r"$\mathcal{L}=\mathcal{L}_{\mathrm{Student\text{-}t\ reconstruction}}"
-        r"+\lambda\,\mathcal{L}_{\mathrm{cross\text{-}paradigm\ consistency}}$",
-        ha="center", va="center", fontsize=15.0, color=COLORS["ink"],
+        r"+\lambda\mathcal{L}_{\mathrm{consistency}}$",
+        title_size=14, body_size=16,
+    )
+
+    physics_center_x = boxes[-1][0] + boxes[-1][1] / 2
+    arrow(
+        ax, (physics_center_x, y), (physics_center_x, loss_y + loss_h),
+        color=COLORS["loss_edge"],
+    )
+
+    input_center_x = boxes[0][0] + boxes[0][1] / 2
+    route_y = 0.43
+    line(ax, (input_center_x, y), (input_center_x, route_y), color=COLORS["input_edge"])
+    line(ax, (input_center_x, route_y), (loss_x - 0.025, route_y), color=COLORS["input_edge"])
+    line(
+        ax, (loss_x - 0.025, route_y), (loss_x - 0.025, loss_y + loss_h / 2),
+        color=COLORS["input_edge"],
+    )
+    arrow(
+        ax, (loss_x - 0.025, loss_y + loss_h / 2), (loss_x, loss_y + loss_h / 2),
+        color=COLORS["input_edge"], width=2.0, head=15,
     )
     ax.text(
-        0.50, 0.068,
-        "Stage 1: clean identifiable signals   |   Stage 2: mixed tCNR, paradigms and artefacts",
-        ha="center", va="center", fontsize=11.5, color=COLORS["ink"],
+        0.33, route_y + 0.018, "observed BOLD PSC",
+        ha="center", va="bottom", fontsize=11, color=COLORS["input_edge"],
     )
-    line(ax, (0.90, 0.245), (0.90, 0.112), COLORS["loss_edge"], 2.5)
-    arrow(ax, (0.90, 0.112), (0.85, 0.112), COLORS["loss_edge"])
-    ax.text(0.885, 0.122, r"compare $\hat{y}(t)$ with observed $y(t)$",
-            ha="right", va="bottom", fontsize=9.2, color=COLORS["loss_edge"])
-    # Back-propagation path to trainable blocks.
-    line(ax, (0.15, 0.112), (0.115, 0.112), COLORS["loss_edge"], 1.6)
-    line(ax, (0.115, 0.112), (0.115, 0.205), COLORS["loss_edge"], 1.6)
-    line(ax, (0.115, 0.205), (0.615, 0.205), COLORS["loss_edge"], 1.6, "--")
-    arrow(ax, (0.615, 0.205), (0.615, 0.57), COLORS["loss_edge"], 1.6, 11)
-    ax.text(0.13, 0.215, "back-propagation updates the 1D CNN, 3D U-Net, parameter heads and CVR residual head",
-            ha="left", va="bottom", fontsize=9.5, color=COLORS["loss_edge"])
 
-    ax.text(0.5, 0.006,
-            "Ground-truth CVR, delay and T maps are hidden during training and used only for final validation/test evaluation.",
-            ha="center", va="bottom", fontsize=10.2, fontweight="bold", color=COLORS["ink"])
+    ax.text(
+        0.30, 0.205,
+        "Back-propagation updates the temporal encoder, 3D U-Net and parameter heads",
+        ha="center", va="center", fontsize=11.5,
+        color=COLORS["loss_edge"], fontweight="bold",
+    )
+    ax.text(
+        0.50, 0.055,
+        "Ground-truth parameter maps are hidden during training and used only for evaluation.",
+        ha="center", va="center", fontsize=11.5,
+        color=COLORS["ink"], fontweight="bold",
+    )
 
     png = OUT_DIR / "current_self_supervised_cvr_architecture.png"
     pdf = OUT_DIR / "current_self_supervised_cvr_architecture.pdf"
