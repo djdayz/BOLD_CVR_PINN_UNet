@@ -70,8 +70,13 @@ src/hybrid_cvr/
 
 scripts/
   run_presentation_evaluation.sh
+  run_latest_full_evaluation_chunked.sh
+  build_latest_evaluation_manifest.py
   evaluate_hrf_sim_condition.py
+  run_hrf_full_manifest.sh
   summarize_compact_inference_hrf.py
+  summarize_latest_full_evaluation.py
+  summarize_real_hrf_agreement.py
   plot_compact_metric_heatmaps.py
   plot_cvr_all_metric_heatmaps.py
   plot_test_cvr_neural_vs_hrf_heatmap.py
@@ -514,6 +519,16 @@ Pearson correlation for CVR, delay, and `T`, indexed by split, paradigm, tCNR,
 and method. Neural-only model inference averaged approximately 1.26 seconds per
 synthetic full volume on the evaluation GPU, excluding on-the-fly simulation.
 The `sub-01/ses-01` full-volume real inference took approximately 13 seconds.
+
+For definitive evaluation of the latest model, use
+`scripts/run_latest_full_evaluation_chunked.sh`. It evaluates all 15 validation
+and 15 test parameter-map cases across all three paradigms and seven tCNR levels
+(630 conditions), runs matched exponential-HRF fitting, and writes case-,
+condition-, and split-level summaries. The chunked workflow copies each batch
+off the VM before clearing temporary outputs to remain compatible with a small
+network volume. Real-subject neural-versus-HRF agreement can be summarized with
+`scripts/summarize_real_hrf_agreement.py`; those values measure agreement with a
+conventional estimator and must not be described as ground-truth accuracy.
 
 ## Git Hygiene
 
