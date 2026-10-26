@@ -19,6 +19,7 @@ run_export() {
   local split_dir="${split}"
   [[ "${split}" == "val" ]] && split_dir="validation"
   local out="${OUTPUT_ROOT}/${split_dir}/${case_id}/${paradigm}/tcnr_${tcnr}"
+  [[ -f "${out}/prediction_metadata.json" ]] && return 0
   PYTHONPATH=src python -m hybrid_cvr.cli predict-sim \
     --checkpoint "${CHECKPOINT}" \
     --config "${CONFIG}" \
