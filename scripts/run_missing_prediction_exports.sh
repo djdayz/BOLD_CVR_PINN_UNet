@@ -38,6 +38,14 @@ export CHECKPOINT CONFIG SIM_ROOT OUTPUT_ROOT
   echo "missing_export_started=$(date -Is)"
   while read -r split case_id paradigm tcnr; do
     [[ -z "${split}" || "${split}" == \#* ]] && continue
+    split_dir="${split}"
+    [[ "${split}" == "val" ]] && split_dir="validation"
+    condition_out="${OUTPUT_ROOT}/${split_dir}/${case_id}/${paradigm}/tcnr_${tcnr}"
+    [[ -f "${condition_out}/prediction_metadata.json" ]] && continue
+    if (( MAX_PARALLEL == 1 )); then
+      run_export "${split}" "${case_id}" "${paradigm}" "${tcnr}"
+      continue
+    fi
     run_export "${split}" "${case_id}" "${paradigm}" "${tcnr}" &
     while (( $(jobs -rp | wc -l) >= MAX_PARALLEL )); do
       wait -n
